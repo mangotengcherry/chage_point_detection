@@ -234,19 +234,140 @@ E = AE epoch (~100),  h = AE hidden size (~256)
 
 ---
 
-## 6. 리스크 및 후속 과제
+## 6. SECOM 실데이터 검증 결과
 
-### 6.1 현재 PoC의 한계
+### 6.1 데이터셋 개요
+
+[UCI SECOM Dataset](https://archive.ics.uci.edu/dataset/179/secom) - 실제 반도체 제조 공정의 센서 데이터.
+
+| 항목 | 값 |
+|------|-----|
+| 출처 | UCI ML Repository (McCann & Johnston, 2008) |
+| 전체 크기 | 1,567 wafers x 590 sensor features |
+| Pass / Fail | 1,463 / 104 (불량률 6.6%) |
+| 정제 후 Feature | 442 (NaN>30% 및 상수 feature 제거) |
+| PCA 투입 Feature | 420 (Continuous만) |
+
+**시나리오 매핑:**
+
+```
+EDS 변경점 분석              SECOM 검증
+─────────────────          ─────────────────
+Ref Group (기존 조건)   →   Pass Wafer 70% (1,024장) — 모델 학습
+Comp Group A (정상)     →   Pass Wafer 30% (439장) — 유의차 없음 기대
+Comp Group B (ECO 평가) →   Fail Wafer (104장) — 유의차 있음 기대
+```
+
+### 6.2 모델 성능
+
+```
+학습 시간: 0.074초 (CPU)
+PCA 주성분: 153개 (설명 분산 95.1%)
+```
+
+### 6.3 유의차 판정 결과
+
+|  | Comp A (Pass) | Comp B (Fail) | Fail/Pass 비 |
+|--|:---:|:---:|:---:|
+| **T²** | 39/439 (8.9%) | 19/104 (18.3%) | **2.1x** |
+| **SPE** | 49/439 (11.2%) | 26/104 (25.0%) | **2.2x** |
+| **T² or SPE** | 58/439 (13.2%) | 29/104 (27.9%) | **2.1x** |
+
+**해석:**
+- Fail 그룹의 유의차 탐지율이 Pass 그룹 대비 **약 2배** 높음
+- 실제 반도체 데이터에서 Pass/Fail 간 차이가 미묘함 (불량률 6.6%, 센서 신호 약함)
+- 합성 데이터(Precision@30=100%)와 달리, 실데이터에서는 신호가 노이즈에 묻히는 현실적 어려움이 드러남
+
+### 6.4 Top 기여 Feature (Fail Group)
+
+| Rank | Feature | Contribution |
+|:---:|---------|:---:|
+| 1 | **Sensor_089** | **73.59** |
+| 2 | Sensor_099 | 13.89 |
+| 3 | Sensor_348 | 12.75 |
+| 4 | Sensor_210 | 8.27 |
+| 5 | Sensor_337 | 7.61 |
+| 6 | Sensor_437 | 6.32 |
+| 7 | Sensor_067 | 5.77 |
+| 8 | Sensor_360 | 5.69 |
+| 9 | Sensor_087 | 5.45 |
+| 10 | Sensor_166 | 5.35 |
+
+**기여도 집중도:**
+
+| 범위 | 전체 기여도 대비 비율 |
+|------|:---:|
+| Top-10 | 24.8% |
+| Top-20 | 33.1% |
+| Top-50 | 50.6% |
+
+→ **Sensor_089가 전체 기여도의 약 12%를 차지하며 압도적** — 해당 센서가 불량과 가장 밀접하게 연관.
+→ Top-50에 50.6% 집중 — 420개 feature 중 상위 50개로 절반 이상의 변동 설명 가능.
+
+### 6.5 시각화 결과
+
+#### Comp A (Pass) vs Comp B (Fail) 대시보드
+
+| Pass Group (유의차 없음 기대) | Fail Group (유의차 있음 기대) |
+|:---:|:---:|
+| ![Pass Dashboard](docs/images/secom_dashboard_pass.png) | ![Fail Dashboard](docs/images/secom_dashboard_fail.png) |
+
+#### Error Rank Curve 비교
+
+| Pass Group | Fail Group |
+|:---:|:---:|
+| ![Rank Pass](docs/images/secom_rank_pass.png) | ![Rank Fail](docs/images/secom_rank_fail.png) |
+
+- **Pass**: 비교적 완만한 분포
+- **Fail**: Sensor_089에 의한 뚜렷한 peak 존재 → 변경 feature 식별 가능
+
+#### Top-30 Feature Contribution (Fail Group)
+
+![Contribution](docs/images/secom_contribution_fail.png)
+
+### 6.6 실데이터 검증에서 얻은 인사이트
+
+| # | 인사이트 | 과제 적용 시사점 |
+|---|---------|-----------------|
+| 1 | 실데이터에서는 Pass/Fail 간 차이가 합성 데이터보다 훨씬 미묘함 | UCL 캘리브레이션 및 임계값 조정이 핵심 |
+| 2 | SPE가 T²보다 일관되게 높은 탐지율을 보임 | SPE를 주요 판정 기준으로 활용 검토 |
+| 3 | Sensor_089처럼 소수 feature에 기여도가 집중되는 패턴이 존재 | Contribution plot이 엔지니어에게 직관적 인사이트 제공 가능 |
+| 4 | Feature 정제(NaN, 상수 제거)가 필수 | 실제 EDS 데이터에도 동일한 전처리 파이프라인 적용 필요 |
+| 5 | alpha=0.01에서도 Pass 그룹의 False Positive가 8-11% | 실데이터 특성에 맞는 alpha 조정 또는 보정 필요 |
+
+---
+
+## 7. 종합 비교 (합성 데이터 vs 실데이터)
+
+| 항목 | 합성 데이터 (demo_phase1) | SECOM 실데이터 (demo_secom) |
+|------|:---:|:---:|
+| Feature 수 | 5,000 | 590 (정제 후 420) |
+| Ref / Comp 크기 | 200 / 100 | 1,024 / 104 |
+| 학습 시간 | 0.122초 | 0.074초 |
+| 주성분 수 | 185 | 153 |
+| Comp 정상 T² 유의차 | 0.0% | 8.9% |
+| Comp 변경 T² 유의차 | 0.0% | 18.3% |
+| Comp 변경 SPE 유의차 | 100% | 25.0% |
+| Feature 분리도 | Precision@30 = 100% | Top-10 기여도 24.8% 집중 |
+| Rank Curve 형태 | ㄴ자 (L-shape) | Sensor_089에 peak + 완만 |
+
+**핵심**: 합성 데이터에서는 이상적인 성능을 보이나, 실데이터에서는 신호가 미묘하여 임계값 조정 및 전처리 고도화가 필수.
+
+---
+
+## 8. 리스크 및 후속 과제
+
+### 8.1 현재 PoC의 한계
 
 | # | 한계 | 영향도 | 대응 방안 |
 |---|------|--------|-----------|
-| 1 | 합성 데이터 기반 검증 (실데이터 미적용) | 높음 | Phase 1 후반부에 실제 ECO 데이터 적용 |
+| 1 | SECOM은 EDS 구조와 다름 (센서 vs BIN) | 높음 | 실제 EDS ECO 데이터 적용 필요 |
 | 2 | PCA는 선형 관계만 포착 | 중간 | 비선형 패턴 존재 시 AE 보완 |
 | 3 | N < P 환경에서 T² UCL이 과도하게 높음 | 중간 | 주성분 수 최적화 또는 SPE 위주 판정 |
 | 4 | SPE UCL 민감도 | 중간 | 실데이터 기반 임계값 캘리브레이션 |
 | 5 | "정합성 80%" metric 미합의 | 높음 | Precision@K 채택 권장 |
 
-### 6.2 향후 로드맵
+### 8.2 향후 로드맵
 
 | Phase | 기간 | 목표 |
 |-------|------|------|
@@ -262,51 +383,25 @@ E = AE epoch (~100),  h = AE hidden size (~256)
 
 ---
 
-## 7. Quick Start
+## 9. Quick Start
 
 ```bash
 # 의존성 설치
 pip install -r requirements.txt
 
-# Phase 1 데모 실행
+# 합성 데이터 데모 (5,000 features, Precision@30=100%)
 python demo_phase1.py
+
+# SECOM 실데이터 데모 (UCI 반도체 공정 데이터, 자동 다운로드)
+python demo_secom.py
 
 # 테스트 실행 (9/9 통과)
 pytest tests/ -v
 ```
 
-### 실행 결과 예시
-
-```
-======================================================================
-  Phase 1: PCA + Hotelling T² 변경점 분석 데모
-======================================================================
-
-[1] 반도체 EDS 데이터 시뮬레이션...
-    Ref Group: 200 wafers x 5000 features
-    Comp Group A (유의차 없음): 100 wafers
-    Comp Group B (유의차 있음): 100 wafers
-    → 실제 변경 feature 수: 30
-
-[2] 데이터 전처리 (Feature 유형 분류)...
-    총 Feature 수: 5000
-    PCA 대상 (Continuous): 4632
-    별도 검정 (Discrete/Binary): 368
-
-[3] PCA + Hotelling T² 모델 학습...
-    학습 시간: 0.122초
-    주성분 수: 185 (설명 분산 95.2%)
-
-[6] 변경 Feature 검출 성능 평가...
-    Precision@10: 1.000  |  Recall@10: 0.333  |  F1@10: 0.500
-    Precision@20: 1.000  |  Recall@20: 0.667  |  F1@20: 0.800
-    Precision@30: 1.000  |  Recall@30: 1.000  |  F1@30: 1.000
-    Precision@50: 0.600  |  Recall@50: 1.000  |  F1@50: 0.750
-```
-
 ---
 
-## 8. Project Structure
+## 10. Project Structure
 
 ```
 change_point_detection/
@@ -319,14 +414,16 @@ change_point_detection/
 ├── docs/
 │   ├── report_phase1.md      # Phase 1 상세 보고서
 │   └── images/               # 시각화 결과 이미지
-├── demo_phase1.py            # Phase 1 데모 스크립트
+├── data/                     # SECOM 데이터 (자동 다운로드)
+├── demo_phase1.py            # 합성 데이터 데모
+├── demo_secom.py             # SECOM 실데이터 데모
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## 9. Usage
+## 11. Usage
 
 ```python
 from src import PCAHotellingT2, DataPreprocessor, ChangePointVisualizer
@@ -354,7 +451,7 @@ viz.plot_dashboard(result, title="Analysis Result", save_name="dashboard.png")
 
 ---
 
-## 10. References
+## 12. References
 
 1. Hotelling, H. (1947). "Multivariate Quality Control." *Techniques of Statistical Analysis*, McGraw-Hill.
 2. Jackson, J.E. & Mudholkar, G.S. (1979). "Control Procedures for Residuals Associated with Principal Component Analysis." *Technometrics*, 21(3), 341-349.
