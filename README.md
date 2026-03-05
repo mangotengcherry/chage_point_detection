@@ -325,15 +325,40 @@ FDR correction의 alpha를 조정하여 검출 민감도를 변화시킨다.
 
 > **2+ 통계검정 동의**: sudden_jump 제외 시 P=0.944, R=0.983, **F1=0.963** (최고)
 
-### 8.5 Precision vs Recall Trade-off
+### 8.5 투표 전략 비교: "2+ agree" vs "All 3 agree"
+
+T-test, KS Test, Mann-Whitney U 세 가지 통계검정의 **투표(voting) 방식** 차이:
+
+| 전략 | 조건 | 특성 |
+|------|------|------|
+| **2+ StatTests agree** | 3개 중 **2개 이상** 유의 판정 시 검출 | 다수결 (Majority Vote) - 관대 |
+| **All 3 StatTests agree** | 3개 **모두** 유의 판정 시 검출 | 만장일치 (Unanimous) - 보수적 |
+
+```
+예시: Feature X의 통계검정 결과
+  T-test: 유의 O   KS: 유의 O   MW-U: 유의 X
+
+  -> 2+ agree: 검출 O (2/3 동의)
+  -> All 3 agree: 검출 X (만장일치 실패)
+```
+
+| 전략 | P (no SJ) | R (no SJ) | F1 (no SJ) | FP | 특징 |
+|------|-----------|-----------|------------|-----|------|
+| **2+ agree** | 0.944 | **0.983** | **0.963** | 7 | 놓치는 것 최소화 |
+| **All 3 agree** | **0.991** | 0.917 | 0.952 | **1** | 오탐 최소화 |
+
+- **FP 최소화** (확실한 것만 보고) -> All 3 agree (FP=1)
+- **FN 최소화** (놓치지 않기) -> 2+ agree (Recall=0.983)
+
+### 8.6 Precision vs Recall Trade-off
 
 ![PR Trade-off](docs/ae_improvement/overall_pr_tradeoff.png)
 
-### 8.6 Hybrid 전략 비교
+### 8.7 Hybrid 전략 비교
 
 ![Hybrid Strategies](docs/ae_improvement/exp4_hybrid_strategies.png)
 
-### 8.7 개선 실험 요약
+### 8.8 개선 실험 요약
 
 | 순위 | 전략 | P (no SJ) | R (no SJ) | F1 (no SJ) | FP |
 |------|------|-----------|-----------|------------|-----|
@@ -345,7 +370,88 @@ FDR correction의 alpha를 조정하여 검출 민감도를 변화시킨다.
 
 ---
 
-## 9. 핵심 인사이트
+## 9. AE Threshold 전략 실험
+
+AE의 reconstruction error를 기반으로 anomaly를 판정할 때, **threshold를 어떻게 설정하느냐**에 따라 성능이 크게 달라진다. 기존 IQR 방식 외에 **Elbow Point**와 **Percentile** 기반 방법을 비교했다.
+
+### 9.1 실험 1: Elbow Point Threshold
+
+정렬된 error ratio 곡선에서 **급변점(elbow)**을 자동 탐지하여 threshold로 사용한다.
+
+**원리**: Feature별 error ratio(= comp error / holdout error)를 오름차순 정렬한 뒤, 첫점-끝점 직선으로부터 수직 거리가 최대인 점을 elbow로 선택 (Kneedle 알고리즘).
+
+![Elbow Point](docs/ae_threshold/exp_elbow_point.png)
+
+| Factor | Threshold | P (all) | R (all) | F1 (all) | P (no SJ) | R (no SJ) | F1 (no SJ) | FP |
+|--------|-----------|---------|---------|----------|-----------|-----------|------------|-----|
+| 0.7 | 13.03 | 1.000 | 0.333 | 0.500 | 1.000 | 0.358 | 0.528 | 0 |
+| 0.8 | 14.89 | 1.000 | 0.307 | 0.469 | 1.000 | 0.325 | 0.491 | 0 |
+| **1.0** | **18.61** | **1.000** | **0.220** | **0.361** | **1.000** | **0.258** | **0.411** | **0** |
+| 1.5 | 27.91 | 1.000 | 0.167 | 0.286 | 1.000 | 0.208 | 0.345 | 0 |
+
+> Elbow Point: P=1.000 (FP=0)이지만 **Recall이 매우 낮음** (0.22~0.33). 분포 기반 검정 대비 AE error ratio 분포가 연속적이어서 명확한 급변점이 형성되지 않음.
+
+### 9.2 실험 2: Percentile 기반 Threshold
+
+**방법 A - Error Ratio Percentile**: error ratio 분포에서 상위 X%를 anomaly로 판정
+
+| Cutoff | P (all) | R (all) | F1 (all) | P (no SJ) | R (no SJ) | F1 (no SJ) | FP |
+|--------|---------|---------|----------|-----------|-----------|------------|-----|
+| P70 | 0.787 | 0.787 | 0.787 | 0.748 | 0.792 | 0.769 | 32 |
+| P75 | 0.832 | 0.693 | 0.756 | 0.800 | 0.700 | 0.747 | 21 |
+| **P80** | **0.900** | **0.600** | **0.720** | **0.881** | **0.617** | **0.725** | **10** |
+| P85 | 0.973 | 0.487 | 0.649 | 0.969 | 0.517 | 0.674 | 2 |
+| P90 | 1.000 | 0.333 | 0.500 | 1.000 | 0.358 | 0.528 | 0 |
+
+**방법 B - Holdout 설명력 기준**: 각 Feature에 대해 holdout error의 P95를 기준으로, comp에서 이를 초과하는 wafer 비율이 정상 기대치의 X배 이상이면 검출
+
+```
+설명력 기준 원리:
+  - AE는 Ref(정상) 패턴을 학습함
+  - 정상 Feature: comp error ≈ holdout error (AE가 잘 "설명"함)
+  - 이상 Feature: comp error >> holdout error (AE가 "설명하지 못하는" 변화)
+  - holdout P95 초과 비율이 기대치(5%)보다 유의하게 높으면 = 설명 불가 = 이상
+```
+
+| 기준 | P (all) | R (all) | F1 (all) | P (no SJ) | R (no SJ) | F1 (no SJ) | FP |
+|------|---------|---------|----------|-----------|-----------|------------|-----|
+| P95 x1.5 | 0.522 | 0.880 | 0.655 | 0.487 | 0.958 | 0.646 | 121 |
+| P95 x2.0 | 0.676 | 0.820 | 0.741 | 0.653 | 0.925 | 0.766 | 59 |
+| **P95 x3.0** | **0.884** | **0.713** | **0.790** | **0.880** | **0.858** | **0.869** | **14** |
+| P95 x5.0 | 0.975 | 0.520 | 0.678 | 0.975 | 0.642 | 0.774 | 2 |
+
+![Percentile Results](docs/ae_threshold/exp_percentile.png)
+
+### 9.3 종합 비교: IQR vs Elbow vs Percentile vs Dual-Path
+
+![Threshold Comparison](docs/ae_threshold/exp_threshold_comparison.png)
+
+| Method | P (all) | R (all) | F1 (all) | P (no SJ) | R (no SJ) | F1 (no SJ) | FP |
+|--------|---------|---------|----------|-----------|-----------|------------|-----|
+| **Dual-Path (a=0.10)** | **1.000** | **0.667** | **0.800** | **1.000** | **0.833** | **0.909** | **0** |
+| Dual-Path (a=0.05) | 1.000 | 0.627 | 0.770 | 1.000 | 0.783 | 0.879 | 0 |
+| Holdout P95 (x3.0) | 0.884 | 0.713 | 0.790 | 0.880 | 0.858 | 0.869 | 14 |
+| Ratio P80 | 0.900 | 0.600 | 0.720 | 0.881 | 0.617 | 0.725 | 10 |
+| Ratio P85 | 0.973 | 0.487 | 0.649 | 0.969 | 0.517 | 0.674 | 2 |
+| IQR (k=1.5) | 0.949 | 0.493 | 0.649 | 0.939 | 0.517 | 0.667 | 4 |
+| IQR (k=2.0) | 0.972 | 0.460 | 0.624 | 0.967 | 0.483 | 0.644 | 2 |
+| Elbow Point | 1.000 | 0.220 | 0.361 | 1.000 | 0.258 | 0.411 | 0 |
+
+![PR Scatter](docs/ae_threshold/exp_threshold_pr_scatter.png)
+
+### 9.4 Threshold 실험 핵심 결론
+
+| 결론 | 상세 |
+|------|------|
+| **Dual-Path가 AE 단독 대비 압도적** | 통계검정과 교차검증이 단순 threshold보다 훨씬 효과적 (F1=0.909 vs 0.725) |
+| **Elbow Point는 과도하게 보수적** | FP=0이지만 R=0.26으로 실용성 부족. Error ratio 분포가 연속적이어서 명확한 급변점 부재 |
+| **Percentile P80이 AE 단독 최적** | P=0.90, R=0.60으로 IQR과 유사하나 직관적 해석 가능 |
+| **설명력 기준 P95 x3이 차선** | Recall 높고(0.858) FP 적당(14), Dual-Path 다음으로 균형 잡힘 |
+| **단순 threshold 한계 명확** | AE 단독 threshold(어떤 방식이든) < Dual-Path < 통계검정 Hybrid |
+
+---
+
+## 10. 핵심 인사이트
 
 | # | 인사이트 | 상세 |
 |---|---------|------|
@@ -357,10 +463,12 @@ FDR correction의 alpha를 조정하여 검출 민감도를 변화시킨다.
 | 6 | **AE 아키텍처는 성능에 미미** | 교집합 전략이 최종 성능을 지배, AE 구조 변경 효과 작음 |
 | 7 | **2+ 통계검정 동의가 최적** | SJ 제외 시 F1=0.963, P=0.944로 가장 균형잡힌 전략 |
 | 8 | **통계검정은 AE 대비 ~19배 빠름** | 실시간 Dashboard 배포에 적합, AE는 배치 분석에 적합 |
+| 9 | **AE 단독 threshold는 Dual-Path에 열세** | Elbow/Percentile/IQR 어떤 방식이든 통계검정 교차검증보다 성능 낮음 |
+| 10 | **설명력 기준(P95 x3)이 AE 단독 차선** | Recall=0.858로 높으나 FP=14, Dual-Path의 FP=0 대비 열세 |
 
 ---
 
-## 10. 배포 전략 권고
+## 11. 배포 전략 권고
 
 ```
 [즉시 배포 - 실시간 Dashboard]
@@ -376,6 +484,12 @@ FDR correction의 alpha를 조정하여 검출 민감도를 변화시킨다.
 +-- All 3 StatTests agree: P=0.991, FP=1
 |   -> AE 없이 높은 Precision 달성 가능
 
+[AE 단독 사용 시]
++-- Dual-Path 교차검증 (alpha=0.10): F1=0.909, FP=0 (최적)
++-- 설명력 기준 P95 x3: F1=0.869, FP=14 (차선)
++-- Percentile P80: F1=0.725, FP=10
++-- Elbow Point: 비추천 (R=0.26, 실용성 부족)
+
 [후속 개선]
 +-- Sudden Jump 전용 탐지기 (이상치 탐지 방법 별도 적용)
 +-- 실 데이터 검증 후 alpha/전략 미세 조정
@@ -383,7 +497,7 @@ FDR correction의 alpha를 조정하여 검출 민감도를 변화시킨다.
 
 ---
 
-## 11. 실행 방법
+## 12. 실행 방법
 
 ```bash
 # 의존성 설치
@@ -398,13 +512,16 @@ python generate_samples.py
 # AE 성능 개선 실험 (4가지 실험, ~2분)
 python experiment_ae_improvement.py
 
+# AE Threshold 실험 (Elbow + Percentile, ~1분)
+python experiment_ae_threshold.py
+
 # 테스트 (33/33 통과)
 pytest tests/ -v
 ```
 
 ---
 
-## 12. Project Structure
+## 13. Project Structure
 
 ```
 chage_point_detection/
@@ -426,16 +543,18 @@ chage_point_detection/
 |   +-- benchmark_results/          # 벤치마크 결과 이미지/CSV
 |   +-- sample_views/               # 유형별 x 난이도별 샘플 시각화 (15개 + 요약)
 |   +-- ae_improvement/             # AE 성능 개선 실험 결과
+|   +-- ae_threshold/               # AE Threshold 실험 결과 (Elbow + Percentile)
 +-- run_benchmark.py                # 벤치마크 실행 스크립트
 +-- generate_samples.py             # 샘플 시각화 생성 스크립트
 +-- experiment_ae_improvement.py    # AE 성능 개선 실험 스크립트
++-- experiment_ae_threshold.py      # AE Threshold 실험 스크립트
 +-- requirements.txt
 +-- README.md
 ```
 
 ---
 
-## 13. Usage
+## 14. Usage
 
 ```python
 from src.data_generation import BINDataGenerator
@@ -468,7 +587,7 @@ for idx in sig_indices:
 
 ---
 
-## 14. References
+## 15. References
 
 1. Hotelling, H. (1947). "Multivariate Quality Control." *Techniques of Statistical Analysis*, McGraw-Hill.
 2. Jackson, J.E. & Mudholkar, G.S. (1979). "Control Procedures for Residuals Associated with PCA." *Technometrics*, 21(3).
