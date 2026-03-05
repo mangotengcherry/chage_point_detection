@@ -1,5 +1,5 @@
 """
-통계검정 기반 변경점 탐지기
+통계검정 기반 변경점 탐지기 (Wafer 기반)
 Mann-Whitney U, KS Test, T-test, Welch's t-test
 """
 import numpy as np
@@ -15,14 +15,13 @@ class MannWhitneyDetector(BaseDetector):
     def __init__(self, alpha: float = 0.05):
         self.alpha = alpha
 
-    def detect(self, ref_data, comp_data, full_series=None) -> DetectionResult:
-        # 상수 배열 체크
-        if np.std(ref_data) == 0 and np.std(comp_data) == 0:
+    def detect_feature(self, ref_values, comp_values) -> DetectionResult:
+        if np.std(ref_values) == 0 and np.std(comp_values) == 0:
             return DetectionResult(confidence=0.0, is_detected=False)
 
         try:
             stat, p_value = stats.mannwhitneyu(
-                ref_data, comp_data, alternative="two-sided"
+                ref_values, comp_values, alternative="two-sided"
             )
         except ValueError:
             return DetectionResult(confidence=0.0, is_detected=False)
@@ -43,9 +42,9 @@ class KSTestDetector(BaseDetector):
     def __init__(self, alpha: float = 0.05):
         self.alpha = alpha
 
-    def detect(self, ref_data, comp_data, full_series=None) -> DetectionResult:
+    def detect_feature(self, ref_values, comp_values) -> DetectionResult:
         try:
-            stat, p_value = stats.ks_2samp(ref_data, comp_data)
+            stat, p_value = stats.ks_2samp(ref_values, comp_values)
         except Exception:
             return DetectionResult(confidence=0.0, is_detected=False)
 
@@ -65,12 +64,12 @@ class TTestDetector(BaseDetector):
     def __init__(self, alpha: float = 0.05):
         self.alpha = alpha
 
-    def detect(self, ref_data, comp_data, full_series=None) -> DetectionResult:
-        if np.std(ref_data) == 0 and np.std(comp_data) == 0:
+    def detect_feature(self, ref_values, comp_values) -> DetectionResult:
+        if np.std(ref_values) == 0 and np.std(comp_values) == 0:
             return DetectionResult(confidence=0.0, is_detected=False)
 
         try:
-            stat, p_value = stats.ttest_ind(ref_data, comp_data, equal_var=True)
+            stat, p_value = stats.ttest_ind(ref_values, comp_values, equal_var=True)
         except Exception:
             return DetectionResult(confidence=0.0, is_detected=False)
 
@@ -90,12 +89,12 @@ class WelchTTestDetector(BaseDetector):
     def __init__(self, alpha: float = 0.05):
         self.alpha = alpha
 
-    def detect(self, ref_data, comp_data, full_series=None) -> DetectionResult:
-        if np.std(ref_data) == 0 and np.std(comp_data) == 0:
+    def detect_feature(self, ref_values, comp_values) -> DetectionResult:
+        if np.std(ref_values) == 0 and np.std(comp_values) == 0:
             return DetectionResult(confidence=0.0, is_detected=False)
 
         try:
-            stat, p_value = stats.ttest_ind(ref_data, comp_data, equal_var=False)
+            stat, p_value = stats.ttest_ind(ref_values, comp_values, equal_var=False)
         except Exception:
             return DetectionResult(confidence=0.0, is_detected=False)
 

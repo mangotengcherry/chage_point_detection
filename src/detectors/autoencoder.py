@@ -1,7 +1,7 @@
 """
-Autoencoder (FC) 기반 변경점 탐지기
+Autoencoder (FC) 기반 변경점 탐지기 (Wafer 기반)
 PyTorch Fully-Connected Autoencoder로 Ref 패턴을 학습하고,
-feature별 reconstruction error로 변경점을 탐지한다.
+feature별 reconstruction error로 유의차를 탐지한다.
 """
 import numpy as np
 import torch
@@ -39,17 +39,16 @@ class _FCAutoencoder(nn.Module):
             if i < len(reversed_dims) - 1:
                 decoder_layers.extend([nn.ReLU(), nn.BatchNorm1d(h_dim)])
             else:
-                decoder_layers.append(nn.ReLU())  # 출력은 non-negative
+                decoder_layers.append(nn.ReLU())
             prev_dim = h_dim
         self.decoder = nn.Sequential(*decoder_layers)
 
     def forward(self, x):
-        z = self.encoder(x)
-        return self.decoder(z)
+        return self.decoder(self.encoder(x))
 
 
 class AutoencoderDetector(BaseDetector):
-    """Autoencoder reconstruction error 기반 변경점 탐지기"""
+    """Autoencoder reconstruction error 기반 탐지기 (Wafer 기반)"""
 
     name = "Autoencoder"
 
@@ -57,32 +56,33 @@ class AutoencoderDetector(BaseDetector):
         self,
         hidden_dims: list = None,
         epochs: int = 100,
-        batch_size: int = 32,
+        batch_size: int = 64,
         lr: float = 1e-3,
         error_threshold: float = 2.0,
+        train_ratio: float = 0.8,
         random_state: int = 42,
     ):
-        self.hidden_dims = hidden_dims or [128, 64, 32]
+        self.hidden_dims = hidden_dims or [256, 128, 64]
         self.epochs = epochs
         self.batch_size = batch_size
         self.lr = lr
         self.error_threshold = error_threshold
+        self.train_ratio = train_ratio
         self.random_state = random_state
 
-    def detect(self, ref_data, comp_data, full_series=None) -> DetectionResult:
-        # 단변량에서는 사용하지 않음
+    def detect_feature(self, ref_values, comp_values) -> DetectionResult:
         return DetectionResult(confidence=0.0, is_detected=False)
 
     def detect_all(self, dataset) -> list:
-        """다변량: 전체 BIN 행렬을 AE로 분석"""
+        """다변량: 전체 Feature 행렬을 AE로 분석"""
         torch.manual_seed(self.random_state)
         np.random.seed(self.random_state)
 
-        ref_matrix = dataset.data[:dataset.ref_end_index, :]  # (ref_len, n_bins)
-        comp_matrix = dataset.data[dataset.ref_end_index:, :]  # (comp_len, n_bins)
-        n_bins = dataset.data.shape[1]
+        ref_matrix = dataset.ref_data    # (n_ref, n_features)
+        comp_matrix = dataset.comp_data  # (n_comp, n_features)
+        n_features = ref_matrix.shape[1]
 
-        # 표준화 (ref 기준)
+        # Ref 기준 표준화
         ref_mean = np.mean(ref_matrix, axis=0, keepdims=True)
         ref_std = np.std(ref_matrix, axis=0, keepdims=True)
         ref_std[ref_std < 1e-10] = 1e-10
@@ -90,63 +90,58 @@ class AutoencoderDetector(BaseDetector):
         ref_scaled = (ref_matrix - ref_mean) / ref_std
         comp_scaled = (comp_matrix - ref_mean) / ref_std
 
-        # Train/Holdout 분리 (80/20)
+        # Train / Holdout 분리
         n_ref = ref_scaled.shape[0]
-        n_train = int(n_ref * 0.8)
-        train_data = ref_scaled[:n_train]
-        holdout_data = ref_scaled[n_train:]
+        n_train = int(n_ref * self.train_ratio)
+        indices = np.arange(n_ref)
+        rng = np.random.RandomState(self.random_state)
+        rng.shuffle(indices)
+        train_data = ref_scaled[indices[:n_train]]
+        holdout_data = ref_scaled[indices[n_train:]]
 
-        # PyTorch 데이터 준비
+        # PyTorch 학습
         device = torch.device("cpu")
         train_tensor = torch.FloatTensor(train_data).to(device)
         train_dataset = TensorDataset(train_tensor, train_tensor)
-        train_loader = DataLoader(
-            train_dataset, batch_size=self.batch_size, shuffle=True
-        )
+        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
 
-        # 모델 학습
-        model = _FCAutoencoder(n_bins, self.hidden_dims).to(device)
+        model = _FCAutoencoder(n_features, self.hidden_dims).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
-        criterion = nn.MSELoss(reduction="none")
+        criterion = nn.MSELoss()
 
         model.train()
         for epoch in range(self.epochs):
             for batch_x, _ in train_loader:
                 optimizer.zero_grad()
                 recon = model(batch_x)
-                loss = criterion(recon, batch_x).mean()
+                loss = criterion(recon, batch_x)
                 loss.backward()
                 optimizer.step()
 
-        # Reconstruction error 산출
+        # Reconstruction error 산출 (feature별)
         model.eval()
         with torch.no_grad():
-            holdout_tensor = torch.FloatTensor(holdout_data).to(device)
-            comp_tensor = torch.FloatTensor(comp_scaled).to(device)
+            holdout_recon = model(torch.FloatTensor(holdout_data)).numpy()
+            comp_recon = model(torch.FloatTensor(comp_scaled)).numpy()
 
-            holdout_recon = model(holdout_tensor).numpy()
-            comp_recon = model(comp_tensor).numpy()
-
-        # Feature별 MSE
         holdout_errors = np.mean((holdout_data - holdout_recon) ** 2, axis=0)
         comp_errors = np.mean((comp_scaled - comp_recon) ** 2, axis=0)
 
-        # 탐지: comp error가 holdout error 대비 유의미하게 높으면 탐지
+        # IQR 기반 threshold
         error_ratio = comp_errors / (holdout_errors + 1e-10)
-        # IQR 기반 threshold (outlier detection)
         q75 = np.percentile(error_ratio, 75)
         q25 = np.percentile(error_ratio, 25)
         iqr = q75 - q25
         threshold = q75 + self.error_threshold * iqr
 
         results = []
-        for i in range(n_bins):
+        for i in range(n_features):
             ratio = error_ratio[i]
             is_detected = ratio > threshold
             confidence = min(ratio / (threshold * 2), 1.0) if threshold > 0 else 0.0
 
             results.append(DetectionResult(
-                bin_index=i,
+                feature_index=i,
                 is_detected=is_detected,
                 confidence=confidence,
                 method_name=self.name,

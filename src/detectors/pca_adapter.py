@@ -1,6 +1,7 @@
 """
 기존 PCAHotellingT2를 벤치마크 인터페이스에 맞게 래핑하는 어댑터
-다변량 방법: detect_all()을 오버라이드하여 전체 BIN 행렬을 한번에 처리한다.
+다변량 방법: detect_all()을 오버라이드하여 전체 Feature 행렬을 한번에 처리한다.
+Wafer 기반: ref_data (n_ref, n_features) vs comp_data (n_comp, n_features)
 """
 import numpy as np
 from .base import BaseDetector, DetectionResult
@@ -22,16 +23,14 @@ class PCAHotellingAdapter(BaseDetector):
         self.alpha = alpha
         self.contribution_threshold = contribution_threshold
 
-    def detect(self, ref_data, comp_data, full_series=None) -> DetectionResult:
-        # 단변량에서는 사용하지 않음 (detect_all에서 다변량으로 처리)
+    def detect_feature(self, ref_values, comp_values) -> DetectionResult:
         return DetectionResult(confidence=0.0, is_detected=False)
 
     def detect_all(self, dataset) -> list:
-        """다변량: 전체 BIN 행렬을 PCA+T²로 분석"""
-        ref_matrix = dataset.data[:dataset.ref_end_index, :]  # (ref_len, n_bins)
-        comp_matrix = dataset.data[dataset.ref_end_index:, :]  # (comp_len, n_bins)
-
-        n_bins = dataset.data.shape[1]
+        """다변량: 전체 Feature 행렬을 PCA+T²로 분석"""
+        ref_matrix = dataset.ref_data    # (n_ref, n_features)
+        comp_matrix = dataset.comp_data  # (n_comp, n_features)
+        n_features = ref_matrix.shape[1]
 
         try:
             model = PCAHotellingT2(
@@ -41,31 +40,24 @@ class PCAHotellingAdapter(BaseDetector):
             model.fit(ref_matrix)
             result = model.analyze(comp_matrix)
 
-            # feature_contributions: (n_comp_samples, n_bins)의 평균 기여도
             mean_contributions = np.mean(
                 np.abs(result.feature_contributions), axis=0
             )
 
-            # 기여도 기반 탐지: percentile 기반 threshold
-            # contribution_threshold는 상위 N%를 탐지하는 percentile 값
-            threshold = np.percentile(mean_contributions,
-                                       100 - self.contribution_threshold * 100 / n_bins * 100)
-            # fallback: mean + 1.5*IQR (robust 방법)
+            # IQR 기반 robust threshold
             q75 = np.percentile(mean_contributions, 75)
             q25 = np.percentile(mean_contributions, 25)
             iqr = q75 - q25
-            threshold_iqr = q75 + 1.5 * iqr
-            threshold = min(threshold, threshold_iqr)
+            threshold = q75 + 1.5 * iqr
 
             results = []
-            for i in range(n_bins):
+            for i in range(n_features):
                 contrib = mean_contributions[i]
                 is_detected = contrib > threshold
-                # confidence: 기여도를 threshold 대비 정규화
                 confidence = min(contrib / (threshold * 2), 1.0) if threshold > 0 else 0.0
 
                 results.append(DetectionResult(
-                    bin_index=i,
+                    feature_index=i,
                     is_detected=is_detected,
                     confidence=confidence,
                     method_name=self.name,
@@ -77,9 +69,8 @@ class PCAHotellingAdapter(BaseDetector):
             return results
 
         except Exception as e:
-            # PCA 실패 시 모든 BIN에 대해 미탐지 반환
             return [
-                DetectionResult(bin_index=i, method_name=self.name,
+                DetectionResult(feature_index=i, method_name=self.name,
                                 extra={"error": str(e)})
-                for i in range(n_bins)
+                for i in range(n_features)
             ]

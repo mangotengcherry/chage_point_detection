@@ -4,6 +4,7 @@ from .visualization import ChangePointVisualizer
 from .data_generation import BINDataGenerator, SyntheticBINDataset
 from .evaluation import BenchmarkEvaluator, BenchmarkResult
 from .benchmark_visualization import BenchmarkVisualizer
+from .dual_path_pipeline import DualPathPipeline, DualPathResult
 
 __all__ = [
     "PCAHotellingT2",
@@ -14,4 +15,6 @@ __all__ = [
     "BenchmarkEvaluator",
     "BenchmarkResult",
     "BenchmarkVisualizer",
+    "DualPathPipeline",
+    "DualPathResult",
 ]

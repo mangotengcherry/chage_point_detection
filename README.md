@@ -1,635 +1,322 @@
-# Change Point Detection (변경점 분석 고도화)
+# EDS BIN Feature 유의차 검출 벤치마크
 
-반도체 EDS 데이터의 Ref Group vs Comp Group 간 유의차를 검출하고, 변경점이 발생한 Feature를 식별하는 프로젝트.
-
----
-
-## 1. 배경 및 문제 정의
-
-### 1.1 현상
-
-DRAM/Flash 제품이 고도화되면서 공정 수가 증가하고, Fab Out까지의 사이클이 길어지고 있다. 개선 조건 적용 후 EDS Test 결과 검증이 제대로 이루어지지 않으면 수율 감소 이슈가 발생하며, 재검증에 많은 시간이 소요된다.
-
-### 1.2 기존 방식의 한계
-
-| 항목 | 현황 |
-|------|------|
-| 전체 EDS Test 아이템 수 | ~10,000개 |
-| 실제 분석 대상 | 대표 항목 ~500개 (전수 검증 불가) |
-| 가성 검출 비율 | 유의차 검출 항목 중 20~30%가 False Positive |
-| 확장성 | Feature 수 증가에 따라 분석 시간 선형 증가 |
-
-### 1.3 목표
-
-- 가성 검출 비율 감소 → 엔지니어가 실제 유의차 항목만 리뷰
-- **10월까지 정합성(Precision) 80% 이상 달성**
+반도체 EDS BIN Item(BIN130~BIN629)에 대해 Ref Group vs Comp Group 간 **유의차가 있는 Feature를 검출**하고, 다양한 탐지 방법의 성능을 정량 비교하는 프로젝트.
 
 ---
 
-## 2. 분석 접근 전략
+## 1. 실험 배경
 
-### 2.1 AutoEncoder 방식의 구조적 문제점
+### 1.1 문제 정의
 
-기존에 AutoEncoder 기반 방법론을 1차로 검토하였으나, 아래 구조적 문제가 확인됨:
+- EDS Item 400~500개 대상 Precision 0.8+ 변경점 분석 모델을 Dashboard로 배포 필요
+- BIN 데이터는 대부분 0-skewed 비정규 분포 -> 비모수 검정이 유리
+- **목표**: 어떤 Feature가 Ref/Comp 간 유의차를 보이는지 자동 검출
 
-| # | 문제 | 상세 |
-|---|------|------|
-| 1 | **RMSE 희석** | `RMSE = sqrt(1/N × Σ error²)` — Feature 수(N) 증가 시 1/N factor로 유의차 신호가 희석됨. 5,000개 feature 중 50개만 유의차가 있으면 4,950개의 정상 feature에 의해 신호 소멸 |
-| 2 | **보상 복원** | AE가 feature 간 상관관계를 학습하여, 변경된 feature도 인접 feature 정보로 "정상처럼" 복원 → False Negative 발생 |
-| 3 | **임계값 근거 부족** | Elbow point 방식은 재현성이 낮고 통계적 근거 부재 |
-| 4 | **데이터 이질성** | Binary/Discrete/Skewed feature를 하나의 모델로 처리 시 학습 불안정 |
+### 1.2 접근 전략
 
-### 2.2 PCA + Hotelling T² Baseline 전략
-
-위 문제를 구조적으로 해결하는 **PCA + Hotelling T²를 Baseline으로 먼저 검증**하고, AE와 정량 비교하는 전략을 수립.
-
-**AE 대비 구조적 장점:**
-
-| 관점 | AutoEncoder | PCA + Hotelling T² |
-|------|-------------|-------------------|
-| 희석 문제 | RMSE 사용 시 발생 | **역공분산(S⁻¹) 가중으로 회피** |
-| 보상 복원 | Feature 간 상관관계로 발생 | **복원 과정 없음** |
-| 임계값 | Elbow point (경험적) | **F-분포 기반 UCL (통계적 근거)** |
-| 해석력 | 블랙박스 | **Loading/Contribution 수학적 분해** |
-| 학습 시간 | 수 분~수십 분 (GPU 필요) | **수 초 (CPU only)** |
-| 재현성 | 실행마다 상이 (random seed 의존) | **100% 동일 결과 (deterministic)** |
-
-**T²가 RMSE 희석을 회피하는 원리:**
-```
-RMSE = sqrt(1/N × Σ error_i²)    → 모든 feature에 동일 가중치 (1/N)
-T²   = (x-μ)ᵀ S⁻¹ (x-μ)          → 역공분산(S⁻¹)으로 차등 가중
-
-→ 분산이 작은 feature에서의 작은 변화도 S⁻¹에 의해 크게 증폭
-→ 소수의 변경 feature 신호가 다수의 정상 feature에 의해 희석되지 않음
-```
+1. **통계검정 즉시 배포**: Mann-Whitney U, KS Test 등 비모수 검정으로 빠르게 서비스
+2. **AE Dual-Path Pipeline**: Autoencoder + 통계검정 교차검증으로 FP 억제
+3. **벤치마크를 통해 최적 방법론 선정**
 
 ---
 
-## 3. 방법론 상세
+## 2. 합성 데이터 설명
 
-### 3.1 PCA + Hotelling T² 파이프라인
-
-```
-[Step 1] Feature 유형 자동 분류
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Raw EDS Data (N wafers × P features)
-      │
-      ├─ Binary (Pass/Fail BIN)      → 별도 Chi-squared 검정
-      ├─ Discrete (Fail bit count)   → 별도 Chi-squared 검정
-      ├─ Continuous Normal            → PCA + T² 분석 대상
-      └─ Continuous Skewed            → Log 변환 후 PCA + T² 분석 대상
-
-[Step 2] PCA 학습 (Ref Group)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Continuous features만 추출
-      │
-      │  StandardScaler → PCA fitting
-      ▼
-주성분 k개 추출 (설명 분산 95% 이상)
-
-[Step 3] 통계량 산출 (Comp Group)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Comp Group wafer → PCA 공간 투영
-      │
-      ├─ T² = Σ(t_i² / λ_i)         : PCA 공간 내 이상도
-      ├─ SPE = ||x - x̂||²           : PCA 잔차 이상도
-      └─ UCL: F-분포 / Chi² 기반      : 통계적 임계값
-
-[Step 4] 변경 Feature 식별
-━━━━━━━━━━━━━━━━━━━━━━━━
-T² > UCL 또는 SPE > UCL → 유의차 존재 판정
-      │
-      │  Contribution Plot (수학적 분해)
-      ▼
-기여도 상위 Feature = 변경점 후보
-```
-
-### 3.2 핵심 통계량
-
-**Hotelling T²:** PCA score를 고유값으로 정규화한 거리
-```
-T² = Σ(i=1 to k) (t_i² / λ_i)
-
-UCL = k(N²-1) / (N(N-k)) × F(α; k, N-k)
-```
-
-**SPE (Squared Prediction Error):** PCA가 설명하지 못하는 잔차의 크기
-```
-SPE = ||x - x̂||²
-
-UCL: Box (1954) Chi-squared 근사
-```
-
-**Contribution Plot:** T²/SPE에 대한 각 Feature의 기여도를 수학적으로 분해
-```
-cont_j = x_j × Σ_i (p_ij × t_i / λ_i)
-```
-
-### 3.3 참고 문헌
-
-1. Hotelling, H. (1947). "Multivariate Quality Control." *Techniques of Statistical Analysis*, McGraw-Hill.
-2. Jackson, J.E. & Mudholkar, G.S. (1979). "Control Procedures for Residuals Associated with Principal Component Analysis." *Technometrics*, 21(3), 341-349.
-3. Kourti, T. & MacGregor, J.F. (1995). "Process Analysis, Monitoring and Diagnosis Using Multivariate Projection Methods." *Chemometrics and Intelligent Laboratory Systems*, 28(1), 3-21.
-4. Wise, B.M. & Gallagher, N.B. (1996). "The Process Chemometrics Approach to Process Monitoring and Fault Detection." *Journal of Process Control*, 6(6), 329-348.
-
----
-
-## 4. 계산 효율성 비교
-
-### 4.1 Big O 비교
-
-```
-P = Feature 수,  N = Wafer 수,  k = 주성분 수 (~30)
-E = AE epoch (~100),  h = AE hidden size (~256)
-```
-
-| 단계 | 기존 통계분석 | AutoEncoder | PCA + T² |
-|------|-------------|-------------|----------|
-| 학습 | — | O(E × N × P × h) | **O(N × P × k)** |
-| 추론 | O(P) 개별 검정 | O(P × h) | **O(P × k)** |
-| 기여도 | — | O(P) | **O(P × k)** |
-
-### 4.2 실측 소요 시간 (5,000 features × 200 wafers)
-
-| 항목 | PCA + T² | AE (예상) | 배수 |
-|------|----------|----------|------|
-| 학습 | **0.122초** | 5~15분 | ~850배 |
-| 추론 (100 wafers) | **0.016초** | 1~5초 | ~8배 |
-| GPU 필요 | **불필요** | 필요 | — |
-| 모델 크기 | **~1 MB** | ~40 MB | ~40배 |
-
----
-
-## 5. Phase 1 PoC 결과
-
-### 5.1 실험 설정
+### 2.1 데이터 구조 (Wafer 기반)
 
 | 항목 | 값 |
 |------|-----|
-| 전체 Feature 수 | 5,000 (Binary 200 + Discrete 300 + Continuous 4,500) |
-| PCA 투입 Feature (Continuous만) | 4,632 |
-| Ref Group | 200 wafers (정상 공정 조건) |
-| Comp Group A | 100 wafers (Ref와 동일 조건, 유의차 없음) |
-| Comp Group B | 100 wafers (30개 feature에 3σ mean shift 주입) |
-| PCA 주성분 수 | 185개 (설명 분산 95.2%) |
-| 유의수준 (α) | 0.01 |
-
-### 5.2 유의차 판정 결과
-
-**Comp Group A (정상 — 유의차 없음 기대):**
-
-| 통계량 | 유의차 Wafer 수 | 비율 | 판정 |
-|--------|----------------|------|------|
-| T² | 0 / 100 | 0.0% | PASS (정상을 정상으로 판정) |
-| SPE | 100 / 100 | 100% | ※ 아래 참고 |
-
-> SPE가 Comp A에서도 100%로 나온 이유: 합성 데이터의 Comp A에 약간의 분산 증가(×1.02)를 주었고, SPE UCL이 Ref의 잔차 분포에 민감하게 반응하기 때문. **실제 데이터 적용 시 SPE 임계값 조정 필요.**
-
-**Comp Group B (변경 — 유의차 있음 기대):**
-
-| 통계량 | 유의차 Wafer 수 | 비율 | 판정 |
-|--------|----------------|------|------|
-| T² | 0 / 100 | 0.0% | ※ N < P 환경에서 UCL이 높게 설정됨 |
-| SPE | 100 / 100 | 100% | PASS (변경을 변경으로 판정) |
-
-### 5.3 변경 Feature 검출 성능 (핵심 지표)
-
-실제 변경된 30개 feature를 기여도 상위에서 얼마나 잘 찾아내는지 평가:
-
-| 지표 | 값 | 의미 |
-|------|-----|------|
-| **Precision@10** | **1.000** | 상위 10개 검출 항목이 모두 실제 변경 feature |
-| **Precision@20** | **1.000** | 상위 20개 검출 항목이 모두 실제 변경 feature |
-| **Precision@30** | **1.000** | 상위 30개 검출 항목이 모두 실제 변경 feature |
-| Precision@50 | 0.600 | 상위 50개 중 30개가 실제 변경 (나머지 20개는 가성) |
-| **Recall@30** | **1.000** | 30개 변경 feature를 모두 검출 |
-| **F1@30** | **1.000** | Precision과 Recall의 조화평균 |
-
-> **핵심 결과: 합성 데이터에서 Precision@30 = 100%, Recall@30 = 100% 달성.** 변경된 30개 feature가 기여도 Top-30에 정확히 위치함.
-
-### 5.4 시각화 결과
-
-#### Comp Group A — 정상 그룹 대시보드
-
-![Comp A Dashboard](docs/images/dashboard_comp_a.png)
-
-- T² 관리도: 모든 wafer가 UCL 미만 → 정상 판정
-- Feature Contribution Rank Curve: 뚜렷한 peak 없음 → 변경 feature 없음
-
-#### Comp Group B — 변경 그룹 대시보드
-
-![Comp B Dashboard](docs/images/dashboard_comp_b.png)
-
-- SPE 관리도: 모든 wafer가 UCL 초과 → 유의차 판정
-- Feature Contribution Rank Curve: 상위 30개에 기여도 집중 → 변경 feature 식별 성공
-
-#### Error Rank Curve 비교
-
-| Comp A (정상) | Comp B (변경) |
-|:---:|:---:|
-| ![Rank A](docs/images/rank_curve_comp_a.png) | ![Rank B](docs/images/rank_curve_comp_b.png) |
-
-- **Comp A**: 완만한 기울기 (변경 feature 없음)
-- **Comp B**: ㄴ자(L-shape) 형태 (소수의 high contribution + 다수의 low) → 좋은 분리
-
----
-
-## 6. SECOM 실데이터 검증 결과
-
-### 6.1 데이터셋 개요
-
-[UCI SECOM Dataset](https://archive.ics.uci.edu/dataset/179/secom) - 실제 반도체 제조 공정의 센서 데이터.
-
-| 항목 | 값 |
-|------|-----|
-| 출처 | UCI ML Repository (McCann & Johnston, 2008) |
-| 전체 크기 | 1,567 wafers x 590 sensor features |
-| Pass / Fail | 1,463 / 104 (불량률 6.6%) |
-| 정제 후 Feature | 442 (NaN>30% 및 상수 feature 제거) |
-| PCA 투입 Feature | 420 (Continuous만) |
-
-**시나리오 매핑:**
-
-```
-EDS 변경점 분석              SECOM 검증
-─────────────────          ─────────────────
-Ref Group (기존 조건)   →   Pass Wafer 70% (1,024장) — 모델 학습
-Comp Group A (정상)     →   Pass Wafer 30% (439장) — 유의차 없음 기대
-Comp Group B (ECO 평가) →   Fail Wafer (104장) — 유의차 있음 기대
-```
-
-### 6.2 모델 성능
-
-```
-학습 시간: 0.074초 (CPU)
-PCA 주성분: 153개 (설명 분산 95.1%)
-```
-
-### 6.3 유의차 판정 결과
-
-|  | Comp A (Pass) | Comp B (Fail) | Fail/Pass 비 |
-|--|:---:|:---:|:---:|
-| **T²** | 39/439 (8.9%) | 19/104 (18.3%) | **2.1x** |
-| **SPE** | 49/439 (11.2%) | 26/104 (25.0%) | **2.2x** |
-| **T² or SPE** | 58/439 (13.2%) | 29/104 (27.9%) | **2.1x** |
-
-**해석:**
-- Fail 그룹의 유의차 탐지율이 Pass 그룹 대비 **약 2배** 높음
-- 실제 반도체 데이터에서 Pass/Fail 간 차이가 미묘함 (불량률 6.6%, 센서 신호 약함)
-- 합성 데이터(Precision@30=100%)와 달리, 실데이터에서는 신호가 노이즈에 묻히는 현실적 어려움이 드러남
-
-### 6.4 Top 기여 Feature (Fail Group)
-
-| Rank | Feature | Contribution |
-|:---:|---------|:---:|
-| 1 | **Sensor_089** | **73.59** |
-| 2 | Sensor_099 | 13.89 |
-| 3 | Sensor_348 | 12.75 |
-| 4 | Sensor_210 | 8.27 |
-| 5 | Sensor_337 | 7.61 |
-| 6 | Sensor_437 | 6.32 |
-| 7 | Sensor_067 | 5.77 |
-| 8 | Sensor_360 | 5.69 |
-| 9 | Sensor_087 | 5.45 |
-| 10 | Sensor_166 | 5.35 |
-
-**기여도 집중도:**
-
-| 범위 | 전체 기여도 대비 비율 |
-|------|:---:|
-| Top-10 | 24.8% |
-| Top-20 | 33.1% |
-| Top-50 | 50.6% |
-
-→ **Sensor_089가 전체 기여도의 약 12%를 차지하며 압도적** — 해당 센서가 불량과 가장 밀접하게 연관.
-→ Top-50에 50.6% 집중 — 420개 feature 중 상위 50개로 절반 이상의 변동 설명 가능.
-
-### 6.5 시각화 결과
-
-#### Comp A (Pass) vs Comp B (Fail) 대시보드
-
-| Pass Group (유의차 없음 기대) | Fail Group (유의차 있음 기대) |
-|:---:|:---:|
-| ![Pass Dashboard](docs/images/secom_dashboard_pass.png) | ![Fail Dashboard](docs/images/secom_dashboard_fail.png) |
-
-#### Error Rank Curve 비교
-
-| Pass Group | Fail Group |
-|:---:|:---:|
-| ![Rank Pass](docs/images/secom_rank_pass.png) | ![Rank Fail](docs/images/secom_rank_fail.png) |
-
-- **Pass**: 비교적 완만한 분포
-- **Fail**: Sensor_089에 의한 뚜렷한 peak 존재 → 변경 feature 식별 가능
-
-#### Top-30 Feature Contribution (Fail Group)
-
-![Contribution](docs/images/secom_contribution_fail.png)
-
-### 6.6 실데이터 검증에서 얻은 인사이트
-
-| # | 인사이트 | 과제 적용 시사점 |
-|---|---------|-----------------|
-| 1 | 실데이터에서는 Pass/Fail 간 차이가 합성 데이터보다 훨씬 미묘함 | UCL 캘리브레이션 및 임계값 조정이 핵심 |
-| 2 | SPE가 T²보다 일관되게 높은 탐지율을 보임 | SPE를 주요 판정 기준으로 활용 검토 |
-| 3 | Sensor_089처럼 소수 feature에 기여도가 집중되는 패턴이 존재 | Contribution plot이 엔지니어에게 직관적 인사이트 제공 가능 |
-| 4 | Feature 정제(NaN, 상수 제거)가 필수 | 실제 EDS 데이터에도 동일한 전처리 파이프라인 적용 필요 |
-| 5 | alpha=0.01에서도 Pass 그룹의 False Positive가 8-11% | 실데이터 특성에 맞는 alpha 조정 또는 보정 필요 |
-
----
-
-## 7. 종합 비교 (합성 데이터 vs 실데이터)
-
-| 항목 | 합성 데이터 (demo_phase1) | SECOM 실데이터 (demo_secom) |
-|------|:---:|:---:|
-| Feature 수 | 5,000 | 590 (정제 후 420) |
-| Ref / Comp 크기 | 200 / 100 | 1,024 / 104 |
-| 학습 시간 | 0.122초 | 0.074초 |
-| 주성분 수 | 185 | 153 |
-| Comp 정상 T² 유의차 | 0.0% | 8.9% |
-| Comp 변경 T² 유의차 | 0.0% | 18.3% |
-| Comp 변경 SPE 유의차 | 100% | 25.0% |
-| Feature 분리도 | Precision@30 = 100% | Top-10 기여도 24.8% 집중 |
-| Rank Curve 형태 | ㄴ자 (L-shape) | Sensor_089에 peak + 완만 |
-
-**핵심**: 합성 데이터에서는 이상적인 성능을 보이나, 실데이터에서는 신호가 미묘하여 임계값 조정 및 전처리 고도화가 필수.
-
----
-
-## 8. 리스크 및 후속 과제
-
-### 8.1 현재 PoC의 한계
-
-| # | 한계 | 영향도 | 대응 방안 |
-|---|------|--------|-----------|
-| 1 | SECOM은 EDS 구조와 다름 (센서 vs BIN) | 높음 | 실제 EDS ECO 데이터 적용 필요 |
-| 2 | PCA는 선형 관계만 포착 | 중간 | 비선형 패턴 존재 시 AE 보완 |
-| 3 | N < P 환경에서 T² UCL이 과도하게 높음 | 중간 | 주성분 수 최적화 또는 SPE 위주 판정 |
-| 4 | SPE UCL 민감도 | 중간 | 실데이터 기반 임계값 캘리브레이션 |
-| 5 | "정합성 80%" metric 미합의 | 높음 | Precision@K 채택 권장 |
-
-### 8.2 향후 로드맵
-
-| Phase | 기간 | 목표 |
-|-------|------|------|
-| **Phase 0** | 3월 | 정합성 metric 합의, Ground Truth 구축 (30건+), Baseline 성능 측정 |
-| **Phase 1** | 4-5월 | 실데이터 PCA+T² 적용, AE와 정량 비교 |
-| **Phase 2** | 6-7월 | 전처리 파이프라인 고도화, ㄴ자 형태 최적화 |
-| **Phase 3** | 8-9월 | Mass 검증 (30건+ ECO), Measure/In-Fab 확장 |
-| **Phase 4** | 10월 | 최종 보고, 엔지니어 사용성 테스트 |
-
-**Fallback 기준:**
-- 6월 말 Precision < 60% → PCA 중심 앙상블로 피봇
-- 8월 말 Precision < 70% → 대상 scope 축소 후 점진 확대
-
----
-
-## 9. Quick Start
-
-```bash
-# 의존성 설치
-pip install -r requirements.txt
-
-# 합성 데이터 데모 (5,000 features, Precision@30=100%)
-python demo_phase1.py
-
-# SECOM 실데이터 데모 (UCI 반도체 공정 데이터, 자동 다운로드)
-python demo_secom.py
-
-# 테스트 실행 (9/9 통과)
-pytest tests/ -v
-```
-
----
-
-## 10. Project Structure
-
-```
-change_point_detection/
-├── src/
-│   ├── pca_hotelling.py          # PCA + Hotelling T² 핵심 모델
-│   ├── preprocessing.py          # 데이터 전처리 (Feature 유형 자동 분류)
-│   ├── visualization.py          # 시각화 (관리도, 기여도, 대시보드)
-│   ├── data_generation.py        # [Phase 2] 합성 BIN 데이터 생성기
-│   ├── evaluation.py             # [Phase 2] 벤치마크 평가 프레임워크
-│   ├── benchmark_visualization.py # [Phase 2] 벤치마크 시각화
-│   └── detectors/                # [Phase 2] 변경점 탐지 방법 패키지
-│       ├── base.py               #   추상 베이스 클래스
-│       ├── statistical.py        #   Mann-Whitney, KS, T-test, Welch
-│       ├── cusum.py              #   CUSUM 탐지기
-│       ├── ruptures_detector.py  #   PELT, BinSeg, Window
-│       ├── pca_adapter.py        #   PCA+T² 어댑터
-│       └── autoencoder.py        #   FC-AE 탐지기
-├── tests/
-│   ├── test_pca_hotelling.py     # Phase 1 단위 테스트 (9/9)
-│   ├── test_data_generation.py   # Phase 2 데이터 생성 테스트 (9/9)
-│   └── test_detectors.py         # Phase 2 탐지기 테스트 (15/15)
-├── docs/
-│   ├── report_phase1.md          # Phase 1 상세 보고서
-│   ├── images/                   # Phase 1 시각화 이미지
-│   └── benchmark_results/        # Phase 2 벤치마크 결과
-├── data/                         # SECOM 데이터 (자동 다운로드)
-├── demo_phase1.py                # 합성 데이터 데모
-├── demo_secom.py                 # SECOM 실데이터 데모
-├── run_benchmark.py              # [Phase 2] 벤치마크 실행 스크립트
-├── requirements.txt
-└── README.md
-```
-
----
-
-## 11. Usage
-
-```python
-from src import PCAHotellingT2, DataPreprocessor, ChangePointVisualizer
-
-# 1. 데이터 전처리 — Feature 유형 자동 분류
-preprocessor = DataPreprocessor()
-preprocessor.analyze_features(ref_data, feature_names)
-ref_cont = preprocessor.get_continuous_features(ref_data)
-comp_cont = preprocessor.get_continuous_features(comp_data)
-
-# 2. PCA + Hotelling T² 모델 학습 및 분석
-model = PCAHotellingT2(n_components=0.95, alpha=0.01)
-model.fit(ref_cont)
-result = model.analyze(comp_cont)
-
-# 3. 결과 확인
-print(f"유의차 wafer: {result.is_significant_t2.sum()}")
-print(f"T² UCL: {result.t2_ucl:.2f}")
-print(f"Top 기여 feature: {result.significant_features[:10]}")
-
-# 4. 시각화
-viz = ChangePointVisualizer(output_dir="outputs")
-viz.plot_dashboard(result, title="Analysis Result", save_name="dashboard.png")
-```
-
----
-
----
-
-## Phase 2: BIN 변경점 탐지 벤치마크 실험
-
-### 실험 배경
-
-EDS BIN Item(BIN130~BIN600)에 대한 변경점 분석을 4~5월까지 Precision 0.8 이상의 성능으로 대시보드 배포해야 하는 상황에서, **단순 통계검정으로 즉시 서비스가 가능한지** 검증하고 Autoencoder 모델과 성능을 비교하기 위한 벤치마크 실험을 수행하였다.
-
-### 합성 데이터 설명
-
-**BIN 데이터 특성:**
-- BIN130~BIN599, 총 470개 BIN item
-- 시계열 300 time points (Ref 150 + Comp 150)
-- 대부분 0에 skewed한 분포, 일부 만성 불량 BIN은 산포 보유
-- 총 150개 anomaly BIN (5가지 유형 × 3단계 난이도 × 10개)
-
-**3가지 BIN baseline 유형:**
+| Ref Group | 1,000 wafers x 500 features |
+| Comp Group | 100 wafers x 500 features |
+| Feature 범위 | BIN130 ~ BIN629 |
+| 정상 Feature | 350개 |
+| Anomaly Feature | 150개 (5유형 x 3난이도 x 10개) |
+
+### 2.2 BIN Baseline 유형 (3가지)
 
 | 유형 | 비율 | 특성 |
 |------|------|------|
-| Zero-heavy | 60% | 90%+ 가 0, 희소한 비영 값 |
+| Zero-heavy | 60% | 90%+ 가 0, 희소한 비영 값 (exponential) |
 | Low-rate | 30% | 평균 0.1~0.5% 불량률 |
 | Moderate-rate | 10% | 평균 1~3% 만성 불량 |
 
-**5가지 Anomaly 유형:**
+### 2.3 Anomaly 유형 (5가지)
 
 | 유형 | 설명 |
 |------|------|
-| Sporadic Spikes | 기존 산포 유사하나 빈번한 큰 스파이크 |
-| Level Shift | 특정 시점 이후 중심치 상승, 일정 기간 후 복귀 |
-| Gradual Trend | 변경점 이후 선형 증가 |
-| Complex Trend | 급상승 → 정상화 → 재상승 (3단계) |
-| Sudden Jump | 1~3 포인트 스파이크 후 즉시 정상 |
+| Sporadic Spikes | 10~20% wafer에서 큰 스파이크 발생 |
+| Level Shift | Comp 전체 wafer의 평균 상승 |
+| Gradual Trend | Wafer 순서대로 점진적 증가 |
+| Complex Trend | 급상승 -> 정상화 -> 재상승 (3단계) |
+| Sudden Jump | 1~3 wafer만 스파이크 후 즉시 정상 |
 
-**3단계 난이도:** Easy (SNR 높음) / Medium / Hard (SNR 낮음)
+### 2.4 난이도 (3단계)
 
-### 탐지 방법 10가지
+| 난이도 | Spike 배수 | Shift 배수 | Trend 배수 |
+|--------|-----------|-----------|-----------|
+| Easy | 15~20x std | 6~8x std | 4~6x std |
+| Medium | 8~12x std | 3~5x std | 2~3x std |
+| Hard | 3~5x std | 1.5~2.5x std | 1~1.5x std |
 
-| # | 방법 | 분류 | 특성 |
-|---|------|------|------|
-| 1 | Mann-Whitney U | 비모수 통계검정 | Rank-based, 0-skewed에 강건 |
-| 2 | KS Test | 비모수 통계검정 | 분포 형태 비교 |
-| 3 | T-test | 모수적 통계검정 | 평균 비교 기준선 |
-| 4 | Welch's t-test | 모수적 통계검정 | 이분산 허용 |
-| 5 | CUSUM | 시계열 방법 | 누적합 기반 sequential detection |
-| 6 | PELT | ruptures | Penalty 기반 최적 분할 |
-| 7 | BinSeg | ruptures | Binary Segmentation |
-| 8 | Window | ruptures | 슬라이딩 윈도우 |
-| 9 | PCA+Hotelling T² | 다변량 | 기존 Phase 1 방법 |
-| 10 | Autoencoder | Deep Learning | FC-AE reconstruction error |
+---
 
-### 실험 결과
+## 3. 탐지 방법
 
-#### 전체 성능 요약
+### 3.1 통계검정 (4종)
+
+| # | 방법 | 특성 |
+|---|------|------|
+| 1 | Mann-Whitney U | 비모수, rank-based, 0-skewed에 강건 |
+| 2 | KS Test | 분포 형태 비교, 가장 빠름 |
+| 3 | T-test | 모수적 평균 비교 기준선 |
+| 4 | Welch's t-test | 이분산 허용 모수 검정 |
+
+### 3.2 다변량/딥러닝 (3종)
+
+| # | 방법 | 특성 |
+|---|------|------|
+| 5 | PCA + Hotelling T2 | 다변량 기여도 분석, IQR threshold |
+| 6 | Autoencoder | FC-AE reconstruction error, IQR threshold |
+| 7 | **AE Dual-Path** | ECO 방법론: AE + 통계검정 교차검증 |
+
+### 3.3 AE Dual-Path Pipeline (ECO 방법론)
+
+```
+[Step 1] AE 학습 (Train 800) -> Holdout 200 + Comp 100 에 대한 Feature별 Recon Error
+[Step 2] AE Error 통계검정 (Holdout Ref vs Comp) -> 1차 후보
+         Mann-Whitney U + KS Test + FDR Correction (BH)
+[Step 3] Raw Feature 통계검정 (Ref vs Comp) -> 2차 후보
+         Mann-Whitney U + KS Test + FDR Correction (BH)
+[Step 4] 교집합 (Cross-Validation) -> 최종 유의 Feature
+         AE Error 유의 AND Raw Feature 유의
+```
+
+- **교집합 전략**: AE Error와 Raw Feature 양쪽 모두에서 유의한 Feature만 최종 검출
+- **FDR Correction**: Benjamini-Hochberg 방법으로 다중검정 보정
+- **이중 검증**: AE의 비선형 패턴 탐지 + 통계검정의 해석 가능성을 결합
+
+---
+
+## 4. 실험 결과
+
+### 4.1 전체 성능 요약
 
 | Method | Precision | Recall | F1 | AUC | Time(s) |
 |--------|-----------|--------|-----|-----|---------|
-| **Welch's t-test** | **0.831** | **0.820** | **0.826** | 0.927 | 0.165 |
-| **T-test** | **0.831** | **0.820** | **0.826** | 0.927 | 0.167 |
-| **Mann-Whitney U** | **0.836** | 0.747 | 0.789 | 0.884 | 0.161 |
-| **KS Test** | **0.904** | 0.687 | 0.780 | 0.904 | 0.089 |
-| **PELT** | **0.964** | 0.533 | 0.687 | 0.764 | 6.524 |
-| CUSUM | 0.433 | 0.993 | 0.603 | 0.862 | 0.095 |
-| Window | 0.497 | 0.627 | 0.555 | 0.714 | 0.556 |
-| BinSeg | 0.344 | 0.967 | 0.507 | 0.558 | 1.613 |
-| Autoencoder | 0.730 | 0.307 | 0.432 | 0.846 | 1.606 |
-| PCA+Hotelling T² | 0.000 | 0.000 | 0.000 | 0.500 | 0.021 |
+| **T-test** | **0.887** | **0.893** | **0.890** | 0.969 | 0.192 |
+| **KS Test** | **0.974** | 0.753 | **0.850** | 0.903 | 0.154 |
+| **Mann-Whitney U** | **0.915** | 0.787 | **0.846** | 0.890 | 0.204 |
+| **Welch's t-test** | **0.823** | 0.807 | **0.815** | 0.929 | 0.202 |
+| **AE Dual-Path** | **1.000** | 0.627 | 0.770 | 0.898 | 3.798 |
+| **Autoencoder** | **0.972** | 0.460 | 0.624 | 0.929 | 4.449 |
+| PCA+Hotelling T2 | 0.000 | 0.000 | 0.000 | 0.500 | 0.087 |
 
-> **Precision 0.8 이상 달성: 5개 방법** (Welch, T-test, Mann-Whitney, KS, PELT)
+> **Precision 0.8 이상 달성: 6개 방법** (T-test, KS, MW-U, Welch, AE Dual-Path, AE)
 
-#### Performance Heatmap
+### 4.2 Performance Heatmap
 
 ![Performance Heatmap](docs/benchmark_results/performance_heatmap.png)
 
-#### Method Comparison
+### 4.3 Method Comparison
 
 ![Method Comparison](docs/benchmark_results/method_comparison_bar.png)
 
-#### ROC Curves
+### 4.4 ROC Curves
 
 ![ROC Curves](docs/benchmark_results/roc_curves.png)
 
-#### Anomaly 유형별 Recall
+### 4.5 Anomaly 유형별 Recall
 
-| Method | gradual_trend | complex_trend | level_shift | sporadic_spikes | sudden_jump |
+| Method | level_shift | gradual_trend | complex_trend | sporadic_spikes | sudden_jump |
 |--------|:---:|:---:|:---:|:---:|:---:|
-| Welch's t-test | 1.000 | 1.000 | 1.000 | 0.967 | 0.133 |
-| Mann-Whitney U | 1.000 | 1.000 | 1.000 | 0.600 | 0.133 |
-| KS Test | 1.000 | 1.000 | 1.000 | 0.367 | 0.067 |
-| CUSUM | 0.967 | 1.000 | 1.000 | 1.000 | **1.000** |
-| BinSeg | 1.000 | 1.000 | 1.000 | 1.000 | 0.833 |
+| T-test | 1.000 | 1.000 | 1.000 | 1.000 | **0.467** |
+| Mann-Whitney U | 1.000 | 1.000 | 1.000 | 0.867 | 0.067 |
+| KS Test | 1.000 | 1.000 | 1.000 | 0.733 | 0.033 |
+| Welch's t-test | 1.000 | 1.000 | 1.000 | 0.967 | 0.067 |
+| AE Dual-Path | 1.000 | 0.867 | 0.933 | 0.333 | 0.000 |
+| Autoencoder | 0.767 | 0.200 | 0.300 | 0.667 | 0.367 |
 
 ![Anomaly Type Breakdown](docs/benchmark_results/anomaly_type_breakdown.png)
 
-#### 난이도별 Recall
+### 4.6 난이도별 Recall
 
 ![Difficulty Breakdown](docs/benchmark_results/difficulty_breakdown.png)
 
-#### Detection Overlay (유형별 시계열)
+---
+
+## 5. Feature 유의차 검출 과정 (AE Dual-Path)
+
+### 5.1 파이프라인 단계별 결과
+
+| 단계 | 검출 Feature 수 |
+|------|:---:|
+| Step 2: AE Error 유의 | 125개 |
+| Step 3: Raw Feature 유의 | 102개 |
+| Step 4: 교집합 (최종) | **94개** |
+| AE만 유의 | 31개 |
+| Raw만 유의 | 8개 |
+
+### 5.2 Ground Truth 대비 정확도
+
+| 지표 | 값 |
+|------|:---:|
+| True Positive (정확 검출) | 94 |
+| False Positive (오탐) | **0** |
+| False Negative (미탐) | 56 |
+| **Precision** | **1.000** |
+| Recall | 0.627 |
+
+> **FP = 0**: 교집합 전략으로 False Positive를 완전 제거
+
+### 5.3 Dual-Path Pipeline 시각화
+
+![Dual-Path Summary](docs/benchmark_results/dual_path_summary.png)
+
+- **좌**: AE Error 차이 (Comp - Holdout) - 유의 Feature 표시 (빨간색)
+- **중**: Raw Feature KS Statistic - 유의 Feature 표시 (빨간색)
+- **우**: 교집합 분류 (AE만 / 교집합 / Raw만)
+
+### 5.4 Feature별 유의차 검출 결과
+
+![Feature Significance](docs/benchmark_results/feature_significance.png)
+
+- **빨간점**: 교집합 (최종 유의) - 94개
+- **주황점**: AE만 유의 - 31개
+- **보라점**: Raw만 유의 - 8개
+- **회색점**: 정상 - 367개
+- **검정 원**: Ground Truth Anomaly 위치
+
+### 5.5 Scatter 차트 (유형별 Ref vs Comp)
 
 | Sporadic Spikes | Level Shift |
 |:---:|:---:|
-| ![Spikes](docs/benchmark_results/detection_overlay_sporadic_spikes.png) | ![Shift](docs/benchmark_results/detection_overlay_level_shift.png) |
+| ![Spikes](docs/benchmark_results/scatter_sporadic_spikes.png) | ![Shift](docs/benchmark_results/scatter_level_shift.png) |
 
 | Gradual Trend | Complex Trend |
 |:---:|:---:|
-| ![Trend](docs/benchmark_results/detection_overlay_gradual_trend.png) | ![Complex](docs/benchmark_results/detection_overlay_complex_trend.png) |
+| ![Trend](docs/benchmark_results/scatter_gradual_trend.png) | ![Complex](docs/benchmark_results/scatter_complex_trend.png) |
 
 | Sudden Jump |
 |:---:|
-| ![Jump](docs/benchmark_results/detection_overlay_sudden_jump.png) |
+| ![Jump](docs/benchmark_results/scatter_sudden_jump.png) |
 
-#### 실행 시간
+---
 
-![Execution Time](docs/benchmark_results/execution_time.png)
-
-### 핵심 인사이트
+## 6. 핵심 인사이트
 
 | # | 인사이트 | 상세 |
 |---|---------|------|
-| 1 | **통계검정이 Precision 0.8+ 달성** | T-test/Welch's (P=0.831, F1=0.826), KS Test (P=0.904), 즉시 배포 가능 |
-| 2 | **Sudden Jump이 가장 어려운 유형** | 1~3 포인트만 변화하므로 분포 비교 방법으로는 탐지 어려움 (Recall 0.07~0.13) |
-| 3 | **CUSUM은 Recall 최고 (0.993)** | 모든 유형을 거의 놓치지 않지만 FP가 높아 Precision 0.433으로 낮음 |
-| 4 | **KS Test가 가장 효율적** | 0.089초로 가장 빠르면서 Precision 0.904로 가장 높은 정밀도 |
-| 5 | **PCA+T²는 시계열 변경점에 비적합** | Wafer 단위 다변량 분석용이며, BIN별 시계열 변경점 탐지에는 구조적 미스매치 |
-| 6 | **AE는 난이도에 민감** | Easy=0.56, Medium=0.28, Hard=0.08 — 미세한 변화 탐지력 부족 |
-| 7 | **통계검정은 난이도 robust** | Easy~Hard 간 Recall 차이가 0.04~0.12 수준으로 안정적 |
+| 1 | **통계검정이 F1 최고** | T-test (F1=0.890) > KS (0.850) > MW-U (0.846), 즉시 배포 가능 |
+| 2 | **AE Dual-Path가 Precision 최고** | P=1.000 (FP=0), 교집합 전략으로 오탐 완전 제거 |
+| 3 | **KS Test가 가장 효율적** | 0.154초로 가장 빠르면서 P=0.974 |
+| 4 | **Sudden Jump이 가장 어려운 유형** | 1~3 wafer만 변화하므로 분포 비교 방법으로는 탐지 어려움 |
+| 5 | **통계검정은 난이도에 robust** | Easy~Hard 간 Recall 차이가 작아 안정적 |
+| 6 | **AE는 mean shift 계열에 강함** | Level Shift(1.000), Complex Trend(0.933) 잘 탐지 |
+| 7 | **교집합 전략 = FP 제거** | AE + Raw 양쪽 유의한 것만 취해 신뢰도 극대화 |
 
-### 배포 전략 권고
+---
+
+## 7. 배포 전략 권고
 
 ```
-[즉시 배포 — 3~4월]
-├── Primary: Welch's t-test (F1=0.826, P=0.831, R=0.820)
-│   → 가장 균형잡힌 P/R, 0.165초로 빠름
-├── Secondary: KS Test (P=0.904, 가장 높은 정밀도)
-│   → Precision 우선 시 사용
-└── Alert용: CUSUM (R=0.993, 거의 놓치지 않음)
-    → 높은 FP를 감수하고 놓치지 않기 위한 보조 경고
+[즉시 배포]
++-- Primary: T-test (F1=0.890, P=0.887, R=0.893)
+|   -> 가장 균형잡힌 P/R, 0.2초로 빠름
++-- Secondary: KS Test (P=0.974, 가장 높은 정밀도)
+|   -> Precision 우선 시 사용
++-- Precision 극대화: AE Dual-Path (P=1.000, FP=0)
+    -> 오탐 허용 불가 시 사용 (Recall은 0.627)
 
-[후속 개선 — 5~6월]
-├── Autoencoder 고도화 (현재 F1=0.432 → 목표 F1=0.7+)
-│   → 학습 데이터 증가, 아키텍처 튜닝 필요
-├── CUSUM threshold 최적화 → FP 감소
-└── 앙상블: Welch + KS + CUSUM 교집합 → Precision 극대화
+[후속 개선]
++-- AE Dual-Path Recall 향상 (현재 0.627 -> 목표 0.8+)
+|   -> AE 아키텍처 튜닝, FDR alpha 조정
++-- 앙상블: T-test + KS + Dual-Path 결합 -> 최적 P/R 밸런스
++-- Sudden Jump 탐지 보완 -> 이상치 탐지 방법 추가 검토
 ```
 
-### 벤치마크 실행 방법
+---
+
+## 8. 실행 방법
 
 ```bash
 # 의존성 설치
 pip install -r requirements.txt
 
-# 벤치마크 실행 (10가지 방법, ~15초)
+# 벤치마크 실행 (7가지 방법, ~15초)
 python run_benchmark.py
 
-# 테스트 (24/24 통과)
+# 테스트 (33/33 통과)
 pytest tests/ -v
 ```
 
 ---
 
-## 12. References
+## 9. Project Structure
+
+```
+chage_point_detection/
++-- src/
+|   +-- data_generation.py          # 합성 BIN 데이터 생성기 (Wafer 기반)
+|   +-- dual_path_pipeline.py       # AE Dual-Path Pipeline (ECO 방법론)
+|   +-- evaluation.py               # 벤치마크 평가 프레임워크
+|   +-- benchmark_visualization.py  # 벤치마크 시각화 (Scatter + Feature 검출)
+|   +-- pca_hotelling.py            # PCA + Hotelling T2 모델
+|   +-- preprocessing.py            # 데이터 전처리
+|   +-- visualization.py            # 기본 시각화
+|   +-- detectors/                  # 변경점 탐지 방법 패키지
+|       +-- base.py                 #   추상 베이스 클래스 (Wafer 기반)
+|       +-- statistical.py          #   Mann-Whitney, KS, T-test, Welch
+|       +-- pca_adapter.py          #   PCA+T2 어댑터
+|       +-- autoencoder.py          #   FC-AE 탐지기
++-- tests/
+|   +-- test_pca_hotelling.py       # PCA 단위 테스트
+|   +-- test_data_generation.py     # 데이터 생성 테스트
+|   +-- test_detectors.py           # 탐지기 테스트
++-- docs/
+|   +-- benchmark_results/          # 벤치마크 결과 이미지/CSV
++-- run_benchmark.py                # 벤치마크 실행 스크립트
++-- requirements.txt
++-- README.md
+```
+
+---
+
+## 10. Usage
+
+```python
+from src.data_generation import BINDataGenerator
+from src.dual_path_pipeline import DualPathPipeline
+
+# 1. 데이터 생성 (또는 실제 데이터 로드)
+gen = BINDataGenerator(n_ref=1000, n_comp=100, n_features=500)
+dataset = gen.generate()
+
+# 2. AE Dual-Path Pipeline 실행
+pipeline = DualPathPipeline(
+    hidden_dims=[256, 128, 64],
+    epochs=100,
+    alpha=0.05,
+    fdr_method="fdr_bh",
+)
+result = pipeline.run(dataset.ref_data, dataset.comp_data, dataset.feature_names)
+
+# 3. 결과 확인
+print(f"AE Error 유의: {result.n_ae_significant}개")
+print(f"Raw Feature 유의: {result.n_raw_significant}개")
+print(f"교집합 (최종): {result.n_intersection}개")
+
+# 4. 유의 Feature 목록
+import numpy as np
+sig_indices = np.where(result.intersection)[0]
+for idx in sig_indices:
+    print(f"  {dataset.feature_names[idx]}: KS={result.raw_ks_statistics[idx]:.4f}")
+```
+
+---
+
+## 11. References
 
 1. Hotelling, H. (1947). "Multivariate Quality Control." *Techniques of Statistical Analysis*, McGraw-Hill.
-2. Jackson, J.E. & Mudholkar, G.S. (1979). "Control Procedures for Residuals Associated with Principal Component Analysis." *Technometrics*, 21(3), 341-349.
-3. Kourti, T. & MacGregor, J.F. (1995). "Process Analysis, Monitoring and Diagnosis Using Multivariate Projection Methods." *Chemometrics and Intelligent Laboratory Systems*, 28(1), 3-21.
-4. Wise, B.M. & Gallagher, N.B. (1996). "The Process Chemometrics Approach to Process Monitoring and Fault Detection." *Journal of Process Control*, 6(6), 329-348.
-5. He, Q.P. & Wang, J. (2007). "Fault Detection Using the k-Nearest Neighbor Rule for Semiconductor Manufacturing Processes." *IEEE Transactions on Semiconductor Manufacturing*, 20(4), 345-354.
+2. Jackson, J.E. & Mudholkar, G.S. (1979). "Control Procedures for Residuals Associated with PCA." *Technometrics*, 21(3).
+3. Benjamini, Y. & Hochberg, Y. (1995). "Controlling the False Discovery Rate." *JRSS Series B*, 57(1), 289-300.
+4. Mann, H.B. & Whitney, D.R. (1947). "On a Test of Whether One of Two Random Variables is Stochastically Larger." *Annals of Mathematical Statistics*, 18(1), 50-60.

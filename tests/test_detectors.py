@@ -1,4 +1,4 @@
-"""탐지기 테스트"""
+"""탐지기 테스트 (Wafer 기반)"""
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -8,7 +8,6 @@ import pytest
 from src.detectors.statistical import (
     MannWhitneyDetector, KSTestDetector, TTestDetector, WelchTTestDetector
 )
-from src.detectors.cusum import CUSUMDetector
 from src.detectors.base import DetectionResult
 
 
@@ -38,7 +37,7 @@ class TestStatisticalDetectors:
         """결과가 DetectionResult 타입인지"""
         detector = DetectorClass()
         ref, comp = normal_data
-        result = detector.detect(ref, comp)
+        result = detector.detect_feature(ref, comp)
         assert isinstance(result, DetectionResult)
 
     @pytest.mark.parametrize("DetectorClass", [
@@ -48,7 +47,7 @@ class TestStatisticalDetectors:
         """명확한 mean shift를 탐지하는지"""
         detector = DetectorClass(alpha=0.05)
         ref, comp = shifted_data
-        result = detector.detect(ref, comp)
+        result = detector.detect_feature(ref, comp)
         assert result.is_detected, f"{DetectorClass.__name__}가 3-sigma shift를 놓침"
 
     @pytest.mark.parametrize("DetectorClass", [
@@ -58,32 +57,25 @@ class TestStatisticalDetectors:
         """confidence가 0~1 범위인지"""
         detector = DetectorClass()
         ref, comp = shifted_data
-        result = detector.detect(ref, comp)
+        result = detector.detect_feature(ref, comp)
         assert 0.0 <= result.confidence <= 1.0
 
-
-class TestCUSUM:
-    def test_detect_shift(self, shifted_data):
-        ref, comp = shifted_data
-        full = np.concatenate([ref, comp])
-        detector = CUSUMDetector(threshold=5.0, drift=0.5)
-        result = detector.detect(ref, comp, full)
-        assert result.is_detected
-
-    def test_change_point_location(self, shifted_data):
-        ref, comp = shifted_data
-        full = np.concatenate([ref, comp])
-        detector = CUSUMDetector(threshold=5.0, drift=0.5)
-        result = detector.detect(ref, comp, full)
-        # change point는 ref period 이후에 있어야 함
-        if result.detected_cp_index >= 0:
-            assert result.detected_cp_index >= len(ref) - 10  # 약간의 여유
+    @pytest.mark.parametrize("DetectorClass", [
+        MannWhitneyDetector, KSTestDetector, TTestDetector, WelchTTestDetector
+    ])
+    def test_no_false_positive_normal(self, DetectorClass, normal_data):
+        """동일 분포에서 false positive가 적어야 함"""
+        detector = DetectorClass(alpha=0.01)
+        ref, comp = normal_data
+        result = detector.detect_feature(ref, comp)
+        # 동일 분포에서도 우연히 유의할 수 있으나 confidence는 낮아야 함
+        assert result.confidence < 0.99
 
     def test_constant_data(self):
         """상수 데이터에서 false positive 없어야 함"""
         ref = np.zeros(150)
         comp = np.zeros(150)
-        full = np.concatenate([ref, comp])
-        detector = CUSUMDetector(threshold=5.0)
-        result = detector.detect(ref, comp, full)
-        assert not result.is_detected
+        for DetectorClass in [MannWhitneyDetector, TTestDetector, WelchTTestDetector]:
+            detector = DetectorClass()
+            result = detector.detect_feature(ref, comp)
+            assert not result.is_detected
