@@ -58,6 +58,14 @@
 | Medium | 8~12x std | 3~5x std | 2~3x std |
 | Hard | 3~5x std | 1.5~2.5x std | 1~1.5x std |
 
+### 2.5 유형별 x 난이도별 샘플 시각화
+
+각 anomaly 유형과 난이도 조합별 샘플을 `docs/sample_views/`에서 확인할 수 있다.
+
+![Sample Matrix](docs/sample_views/summary_matrix.png)
+
+> 개별 상세 차트 (Scatter + Distribution + Box plot): `docs/sample_views/{유형}_{난이도}.png`
+
 ---
 
 ## 3. 탐지 방법
@@ -261,42 +269,121 @@ Jaccard Similarity로 방법 간 검출 결과의 유사성을 비교한다.
 
 ---
 
-## 8. 핵심 인사이트
+## 8. AE 성능 개선 실험
+
+AE Dual-Path의 Recall을 향상시키기 위해 4가지 실험을 수행했다. Sudden Jump 유형은 1~3 wafer만 변화하는 극단적 특성으로, 분포 기반 방법으로는 구조적으로 탐지가 어려워 별도 평가 기준을 적용했다.
+
+### 8.1 실험 1: FDR Alpha 튜닝
+
+FDR correction의 alpha를 조정하여 검출 민감도를 변화시킨다.
+
+| Alpha | P (all) | R (all) | F1 (all) | P (no SJ) | R (no SJ) | F1 (no SJ) | FP |
+|-------|---------|---------|----------|-----------|-----------|------------|-----|
+| 0.01 | 1.000 | 0.587 | 0.739 | 1.000 | 0.733 | 0.846 | 0 |
+| 0.05 | 1.000 | 0.627 | 0.770 | 1.000 | 0.783 | 0.879 | 0 |
+| **0.10** | **1.000** | **0.667** | **0.800** | **1.000** | **0.833** | **0.909** | **0** |
+| 0.15 | 1.000 | 0.687 | 0.814 | 1.000 | 0.858 | 0.924 | 0 |
+| 0.20 | 0.991 | 0.700 | 0.820 | 0.991 | 0.875 | 0.929 | 1 |
+| 0.30 | 0.982 | 0.720 | 0.831 | 0.982 | 0.900 | 0.939 | 2 |
+
+> alpha=0.15까지 FP=0 유지. alpha=0.10 추천 (P=1.000, F1=0.800)
+
+![Alpha Tuning](docs/ae_improvement/exp1_alpha_tuning.png)
+
+### 8.2 실험 2: 교집합 vs 합집합 전략
+
+| Strategy | P (all) | R (all) | F1 (all) | P (no SJ) | R (no SJ) | F1 (no SJ) | FP |
+|----------|---------|---------|----------|-----------|-----------|------------|-----|
+| Intersection (AE AND Raw) | 1.000 | 0.667 | 0.800 | 1.000 | 0.833 | 0.909 | 0 |
+| **Raw Only (alpha=0.10)** | **1.000** | **0.713** | **0.833** | **1.000** | **0.892** | **0.943** | **0** |
+| Relaxed (Raw OR AE+highKS) | 0.933 | 0.747 | 0.830 | 0.933 | 0.925 | 0.929 | 8 |
+| Union (AE OR Raw) | 0.811 | 0.773 | 0.792 | 0.804 | 0.925 | 0.860 | 27 |
+
+> Raw Only (alpha=0.10)가 FP=0이면서 F1=0.833 달성, 교집합보다 우수
+
+### 8.3 실험 3: AE 아키텍처 비교
+
+| Architecture | P (all) | R (all) | F1 (all) | Time(s) |
+|-------------|---------|---------|----------|---------|
+| Shallow [128, 64] | 1.000 | 0.667 | 0.800 | 2.61 |
+| Default [256, 128, 64] | 1.000 | 0.667 | 0.800 | 3.64 |
+| Deep [512, 256, 128, 64] | 1.000 | 0.647 | 0.785 | 5.62 |
+| Wide [512, 256, 128] | 1.000 | 0.647 | 0.785 | 4.99 |
+| Narrow [128, 32] | 1.000 | 0.653 | 0.790 | 2.49 |
+
+> AE 아키텍처 변경은 성능에 미미한 영향. Shallow가 가장 빠르면서 동등 성능
+
+### 8.4 실험 4: Hybrid 전략 (통계검정 + AE)
+
+| Strategy | P (all) | R (all) | F1 (all) | P (no SJ) | R (no SJ) | F1 (no SJ) | FP |
+|----------|---------|---------|----------|-----------|-----------|------------|-----|
+| **2+ StatTests agree** | **0.945** | **0.800** | **0.866** | **0.944** | **0.983** | **0.963** | **7** |
+| All 3 StatTests agree | 0.991 | 0.733 | 0.843 | 0.991 | 0.917 | 0.952 | 1 |
+| T-test OR AE-DP | 0.887 | 0.893 | 0.890 | 0.876 | 1.000 | 0.934 | 17 |
+| T-test only (baseline) | 0.887 | 0.893 | 0.890 | 0.876 | 1.000 | 0.934 | 17 |
+| AE-DP only (baseline) | 1.000 | 0.667 | 0.800 | 1.000 | 0.833 | 0.909 | 0 |
+
+> **2+ 통계검정 동의**: sudden_jump 제외 시 P=0.944, R=0.983, **F1=0.963** (최고)
+
+### 8.5 Precision vs Recall Trade-off
+
+![PR Trade-off](docs/ae_improvement/overall_pr_tradeoff.png)
+
+### 8.6 Hybrid 전략 비교
+
+![Hybrid Strategies](docs/ae_improvement/exp4_hybrid_strategies.png)
+
+### 8.7 개선 실험 요약
+
+| 순위 | 전략 | P (no SJ) | R (no SJ) | F1 (no SJ) | FP |
+|------|------|-----------|-----------|------------|-----|
+| 1 | **2+ 통계검정 동의** | 0.944 | 0.983 | **0.963** | 7 |
+| 2 | All 3 통계검정 동의 | 0.991 | 0.917 | 0.952 | 1 |
+| 3 | Raw Only (alpha=0.10) | 1.000 | 0.892 | 0.943 | 0 |
+| 4 | AE Dual-Path (alpha=0.30) | 0.982 | 0.900 | 0.939 | 2 |
+| 5 | AE Dual-Path (alpha=0.15) | 1.000 | 0.858 | 0.924 | 0 |
+
+---
+
+## 9. 핵심 인사이트
 
 | # | 인사이트 | 상세 |
 |---|---------|------|
 | 1 | **통계검정이 F1 최고** | T-test (F1=0.890) > KS (0.850) > MW-U (0.846), 즉시 배포 가능 |
 | 2 | **AE Dual-Path가 Precision 최고** | P=1.000 (FP=0), 교집합 전략으로 오탐 완전 제거 |
 | 3 | **KS Test가 가장 효율적** | 0.196초로 가장 빠르면서 P=0.974, 효율성(F1/sec) 최고 |
-| 4 | **Sudden Jump이 가장 어려운 유형** | 1~3 wafer만 변화하므로 분포 비교 방법으로는 탐지 어려움 |
+| 4 | **Sudden Jump은 구조적 한계** | 1~3 wafer만 변화 -> 분포 비교로는 탐지 어려움, 별도 접근 필요 |
 | 5 | **통계검정은 난이도에 robust** | Easy~Hard 간 Recall 차이가 작아 안정적 |
-| 6 | **AE는 mean shift 계열에 강함** | Level Shift(1.000), Complex Trend(0.933) 잘 탐지 |
-| 7 | **교집합 전략 = FP 제거** | AE + Raw 양쪽 유의한 것만 취해 신뢰도 극대화 |
+| 6 | **AE 아키텍처는 성능에 미미** | 교집합 전략이 최종 성능을 지배, AE 구조 변경 효과 작음 |
+| 7 | **2+ 통계검정 동의가 최적** | SJ 제외 시 F1=0.963, P=0.944로 가장 균형잡힌 전략 |
 | 8 | **통계검정은 AE 대비 ~19배 빠름** | 실시간 Dashboard 배포에 적합, AE는 배치 분석에 적합 |
 
 ---
 
-## 9. 배포 전략 권고
+## 10. 배포 전략 권고
 
 ```
-[즉시 배포]
-+-- Primary: T-test (F1=0.890, P=0.887, R=0.893)
-|   -> 가장 균형잡힌 P/R, 0.285초로 빠름
-+-- Secondary: KS Test (P=0.974, 가장 높은 정밀도)
-|   -> Precision 우선 시 사용, 가장 빠름 (0.196초)
-+-- Precision 극대화: AE Dual-Path (P=1.000, FP=0)
-    -> 오탐 허용 불가 시 사용 (Recall은 0.627)
+[즉시 배포 - 실시간 Dashboard]
++-- Primary: 2+ 통계검정 동의 (F1=0.866, P=0.945)
+|   -> T-test + KS + MW-U 중 2개 이상 유의 시 검출
+|   -> sudden_jump 제외 시 F1=0.963
++-- Alternative: T-test 단독 (F1=0.890, 가장 간단)
+|   -> 구현 단순, 0.285초로 빠름
+
+[Precision 극대화 - 배치 분석]
++-- AE Dual-Path (alpha=0.15): P=1.000, FP=0, R=0.687
+|   -> 오탐 허용 불가 시 사용
++-- All 3 StatTests agree: P=0.991, FP=1
+|   -> AE 없이 높은 Precision 달성 가능
 
 [후속 개선]
-+-- AE Dual-Path Recall 향상 (현재 0.627 -> 목표 0.8+)
-|   -> AE 아키텍처 튜닝, FDR alpha 조정
-+-- 앙상블: T-test + KS + Dual-Path 결합 -> 최적 P/R 밸런스
-+-- Sudden Jump 탐지 보완 -> 이상치 탐지 방법 추가 검토
++-- Sudden Jump 전용 탐지기 (이상치 탐지 방법 별도 적용)
++-- 실 데이터 검증 후 alpha/전략 미세 조정
 ```
 
 ---
 
-## 10. 실행 방법
+## 11. 실행 방법
 
 ```bash
 # 의존성 설치
@@ -305,13 +392,19 @@ pip install -r requirements.txt
 # 벤치마크 실행 (6가지 방법, ~15초)
 python run_benchmark.py
 
+# 샘플 시각화 생성 (유형별 x 난이도별 15개 차트)
+python generate_samples.py
+
+# AE 성능 개선 실험 (4가지 실험, ~2분)
+python experiment_ae_improvement.py
+
 # 테스트 (33/33 통과)
 pytest tests/ -v
 ```
 
 ---
 
-## 11. Project Structure
+## 12. Project Structure
 
 ```
 chage_point_detection/
@@ -331,14 +424,18 @@ chage_point_detection/
 |   +-- test_detectors.py           # 탐지기 테스트
 +-- docs/
 |   +-- benchmark_results/          # 벤치마크 결과 이미지/CSV
+|   +-- sample_views/               # 유형별 x 난이도별 샘플 시각화 (15개 + 요약)
+|   +-- ae_improvement/             # AE 성능 개선 실험 결과
 +-- run_benchmark.py                # 벤치마크 실행 스크립트
++-- generate_samples.py             # 샘플 시각화 생성 스크립트
++-- experiment_ae_improvement.py    # AE 성능 개선 실험 스크립트
 +-- requirements.txt
 +-- README.md
 ```
 
 ---
 
-## 12. Usage
+## 13. Usage
 
 ```python
 from src.data_generation import BINDataGenerator
@@ -371,7 +468,7 @@ for idx in sig_indices:
 
 ---
 
-## 13. References
+## 14. References
 
 1. Hotelling, H. (1947). "Multivariate Quality Control." *Techniques of Statistical Analysis*, McGraw-Hill.
 2. Jackson, J.E. & Mudholkar, G.S. (1979). "Control Procedures for Residuals Associated with PCA." *Technometrics*, 21(3).
