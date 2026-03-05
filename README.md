@@ -406,17 +406,31 @@ pytest tests/ -v
 ```
 change_point_detection/
 ├── src/
-│   ├── pca_hotelling.py      # PCA + Hotelling T² 핵심 모델
-│   ├── preprocessing.py      # 데이터 전처리 (Feature 유형 자동 분류)
-│   └── visualization.py      # 시각화 (관리도, 기여도, 대시보드)
+│   ├── pca_hotelling.py          # PCA + Hotelling T² 핵심 모델
+│   ├── preprocessing.py          # 데이터 전처리 (Feature 유형 자동 분류)
+│   ├── visualization.py          # 시각화 (관리도, 기여도, 대시보드)
+│   ├── data_generation.py        # [Phase 2] 합성 BIN 데이터 생성기
+│   ├── evaluation.py             # [Phase 2] 벤치마크 평가 프레임워크
+│   ├── benchmark_visualization.py # [Phase 2] 벤치마크 시각화
+│   └── detectors/                # [Phase 2] 변경점 탐지 방법 패키지
+│       ├── base.py               #   추상 베이스 클래스
+│       ├── statistical.py        #   Mann-Whitney, KS, T-test, Welch
+│       ├── cusum.py              #   CUSUM 탐지기
+│       ├── ruptures_detector.py  #   PELT, BinSeg, Window
+│       ├── pca_adapter.py        #   PCA+T² 어댑터
+│       └── autoencoder.py        #   FC-AE 탐지기
 ├── tests/
-│   └── test_pca_hotelling.py # 단위 테스트 (9/9)
+│   ├── test_pca_hotelling.py     # Phase 1 단위 테스트 (9/9)
+│   ├── test_data_generation.py   # Phase 2 데이터 생성 테스트 (9/9)
+│   └── test_detectors.py         # Phase 2 탐지기 테스트 (15/15)
 ├── docs/
-│   ├── report_phase1.md      # Phase 1 상세 보고서
-│   └── images/               # 시각화 결과 이미지
-├── data/                     # SECOM 데이터 (자동 다운로드)
-├── demo_phase1.py            # 합성 데이터 데모
-├── demo_secom.py             # SECOM 실데이터 데모
+│   ├── report_phase1.md          # Phase 1 상세 보고서
+│   ├── images/                   # Phase 1 시각화 이미지
+│   └── benchmark_results/        # Phase 2 벤치마크 결과
+├── data/                         # SECOM 데이터 (자동 다운로드)
+├── demo_phase1.py                # 합성 데이터 데모
+├── demo_secom.py                 # SECOM 실데이터 데모
+├── run_benchmark.py              # [Phase 2] 벤치마크 실행 스크립트
 ├── requirements.txt
 └── README.md
 ```
@@ -447,6 +461,167 @@ print(f"Top 기여 feature: {result.significant_features[:10]}")
 # 4. 시각화
 viz = ChangePointVisualizer(output_dir="outputs")
 viz.plot_dashboard(result, title="Analysis Result", save_name="dashboard.png")
+```
+
+---
+
+---
+
+## Phase 2: BIN 변경점 탐지 벤치마크 실험
+
+### 실험 배경
+
+EDS BIN Item(BIN130~BIN600)에 대한 변경점 분석을 4~5월까지 Precision 0.8 이상의 성능으로 대시보드 배포해야 하는 상황에서, **단순 통계검정으로 즉시 서비스가 가능한지** 검증하고 Autoencoder 모델과 성능을 비교하기 위한 벤치마크 실험을 수행하였다.
+
+### 합성 데이터 설명
+
+**BIN 데이터 특성:**
+- BIN130~BIN599, 총 470개 BIN item
+- 시계열 300 time points (Ref 150 + Comp 150)
+- 대부분 0에 skewed한 분포, 일부 만성 불량 BIN은 산포 보유
+- 총 150개 anomaly BIN (5가지 유형 × 3단계 난이도 × 10개)
+
+**3가지 BIN baseline 유형:**
+
+| 유형 | 비율 | 특성 |
+|------|------|------|
+| Zero-heavy | 60% | 90%+ 가 0, 희소한 비영 값 |
+| Low-rate | 30% | 평균 0.1~0.5% 불량률 |
+| Moderate-rate | 10% | 평균 1~3% 만성 불량 |
+
+**5가지 Anomaly 유형:**
+
+| 유형 | 설명 |
+|------|------|
+| Sporadic Spikes | 기존 산포 유사하나 빈번한 큰 스파이크 |
+| Level Shift | 특정 시점 이후 중심치 상승, 일정 기간 후 복귀 |
+| Gradual Trend | 변경점 이후 선형 증가 |
+| Complex Trend | 급상승 → 정상화 → 재상승 (3단계) |
+| Sudden Jump | 1~3 포인트 스파이크 후 즉시 정상 |
+
+**3단계 난이도:** Easy (SNR 높음) / Medium / Hard (SNR 낮음)
+
+### 탐지 방법 10가지
+
+| # | 방법 | 분류 | 특성 |
+|---|------|------|------|
+| 1 | Mann-Whitney U | 비모수 통계검정 | Rank-based, 0-skewed에 강건 |
+| 2 | KS Test | 비모수 통계검정 | 분포 형태 비교 |
+| 3 | T-test | 모수적 통계검정 | 평균 비교 기준선 |
+| 4 | Welch's t-test | 모수적 통계검정 | 이분산 허용 |
+| 5 | CUSUM | 시계열 방법 | 누적합 기반 sequential detection |
+| 6 | PELT | ruptures | Penalty 기반 최적 분할 |
+| 7 | BinSeg | ruptures | Binary Segmentation |
+| 8 | Window | ruptures | 슬라이딩 윈도우 |
+| 9 | PCA+Hotelling T² | 다변량 | 기존 Phase 1 방법 |
+| 10 | Autoencoder | Deep Learning | FC-AE reconstruction error |
+
+### 실험 결과
+
+#### 전체 성능 요약
+
+| Method | Precision | Recall | F1 | AUC | Time(s) |
+|--------|-----------|--------|-----|-----|---------|
+| **Welch's t-test** | **0.831** | **0.820** | **0.826** | 0.927 | 0.165 |
+| **T-test** | **0.831** | **0.820** | **0.826** | 0.927 | 0.167 |
+| **Mann-Whitney U** | **0.836** | 0.747 | 0.789 | 0.884 | 0.161 |
+| **KS Test** | **0.904** | 0.687 | 0.780 | 0.904 | 0.089 |
+| **PELT** | **0.964** | 0.533 | 0.687 | 0.764 | 6.524 |
+| CUSUM | 0.433 | 0.993 | 0.603 | 0.862 | 0.095 |
+| Window | 0.497 | 0.627 | 0.555 | 0.714 | 0.556 |
+| BinSeg | 0.344 | 0.967 | 0.507 | 0.558 | 1.613 |
+| Autoencoder | 0.730 | 0.307 | 0.432 | 0.846 | 1.606 |
+| PCA+Hotelling T² | 0.000 | 0.000 | 0.000 | 0.500 | 0.021 |
+
+> **Precision 0.8 이상 달성: 5개 방법** (Welch, T-test, Mann-Whitney, KS, PELT)
+
+#### Performance Heatmap
+
+![Performance Heatmap](docs/benchmark_results/performance_heatmap.png)
+
+#### Method Comparison
+
+![Method Comparison](docs/benchmark_results/method_comparison_bar.png)
+
+#### ROC Curves
+
+![ROC Curves](docs/benchmark_results/roc_curves.png)
+
+#### Anomaly 유형별 Recall
+
+| Method | gradual_trend | complex_trend | level_shift | sporadic_spikes | sudden_jump |
+|--------|:---:|:---:|:---:|:---:|:---:|
+| Welch's t-test | 1.000 | 1.000 | 1.000 | 0.967 | 0.133 |
+| Mann-Whitney U | 1.000 | 1.000 | 1.000 | 0.600 | 0.133 |
+| KS Test | 1.000 | 1.000 | 1.000 | 0.367 | 0.067 |
+| CUSUM | 0.967 | 1.000 | 1.000 | 1.000 | **1.000** |
+| BinSeg | 1.000 | 1.000 | 1.000 | 1.000 | 0.833 |
+
+![Anomaly Type Breakdown](docs/benchmark_results/anomaly_type_breakdown.png)
+
+#### 난이도별 Recall
+
+![Difficulty Breakdown](docs/benchmark_results/difficulty_breakdown.png)
+
+#### Detection Overlay (유형별 시계열)
+
+| Sporadic Spikes | Level Shift |
+|:---:|:---:|
+| ![Spikes](docs/benchmark_results/detection_overlay_sporadic_spikes.png) | ![Shift](docs/benchmark_results/detection_overlay_level_shift.png) |
+
+| Gradual Trend | Complex Trend |
+|:---:|:---:|
+| ![Trend](docs/benchmark_results/detection_overlay_gradual_trend.png) | ![Complex](docs/benchmark_results/detection_overlay_complex_trend.png) |
+
+| Sudden Jump |
+|:---:|
+| ![Jump](docs/benchmark_results/detection_overlay_sudden_jump.png) |
+
+#### 실행 시간
+
+![Execution Time](docs/benchmark_results/execution_time.png)
+
+### 핵심 인사이트
+
+| # | 인사이트 | 상세 |
+|---|---------|------|
+| 1 | **통계검정이 Precision 0.8+ 달성** | T-test/Welch's (P=0.831, F1=0.826), KS Test (P=0.904), 즉시 배포 가능 |
+| 2 | **Sudden Jump이 가장 어려운 유형** | 1~3 포인트만 변화하므로 분포 비교 방법으로는 탐지 어려움 (Recall 0.07~0.13) |
+| 3 | **CUSUM은 Recall 최고 (0.993)** | 모든 유형을 거의 놓치지 않지만 FP가 높아 Precision 0.433으로 낮음 |
+| 4 | **KS Test가 가장 효율적** | 0.089초로 가장 빠르면서 Precision 0.904로 가장 높은 정밀도 |
+| 5 | **PCA+T²는 시계열 변경점에 비적합** | Wafer 단위 다변량 분석용이며, BIN별 시계열 변경점 탐지에는 구조적 미스매치 |
+| 6 | **AE는 난이도에 민감** | Easy=0.56, Medium=0.28, Hard=0.08 — 미세한 변화 탐지력 부족 |
+| 7 | **통계검정은 난이도 robust** | Easy~Hard 간 Recall 차이가 0.04~0.12 수준으로 안정적 |
+
+### 배포 전략 권고
+
+```
+[즉시 배포 — 3~4월]
+├── Primary: Welch's t-test (F1=0.826, P=0.831, R=0.820)
+│   → 가장 균형잡힌 P/R, 0.165초로 빠름
+├── Secondary: KS Test (P=0.904, 가장 높은 정밀도)
+│   → Precision 우선 시 사용
+└── Alert용: CUSUM (R=0.993, 거의 놓치지 않음)
+    → 높은 FP를 감수하고 놓치지 않기 위한 보조 경고
+
+[후속 개선 — 5~6월]
+├── Autoencoder 고도화 (현재 F1=0.432 → 목표 F1=0.7+)
+│   → 학습 데이터 증가, 아키텍처 튜닝 필요
+├── CUSUM threshold 최적화 → FP 감소
+└── 앙상블: Welch + KS + CUSUM 교집합 → Precision 극대화
+```
+
+### 벤치마크 실행 방법
+
+```bash
+# 의존성 설치
+pip install -r requirements.txt
+
+# 벤치마크 실행 (10가지 방법, ~15초)
+python run_benchmark.py
+
+# 테스트 (24/24 통과)
+pytest tests/ -v
 ```
 
 ---
