@@ -5,7 +5,6 @@ from .statistical import (
     TTestDetector,
     WelchTTestDetector,
 )
-from .pca_adapter import PCAHotellingAdapter
 from .autoencoder import AutoencoderDetector
 
 __all__ = [
@@ -15,6 +14,5 @@ __all__ = [
     "KSTestDetector",
     "TTestDetector",
     "WelchTTestDetector",
-    "PCAHotellingAdapter",
     "AutoencoderDetector",
 ]

@@ -1,0 +1,7 @@
+Method,Total(s),Per Feature(ms),F1,Precision,Est.1000feat(s),Est.5000feat(s),Complexity
+KS Test,0.196,0.392,0.85,0.974,0.39,1.96,O(n_wafers * n_features)
+Mann-Whitney U,0.251,0.501,0.846,0.915,0.5,2.51,O(n_wafers * n_features)
+Welch's t-test,0.251,0.501,0.815,0.823,0.5,2.51,O(n_wafers * n_features)
+T-test,0.285,0.57,0.89,0.887,0.57,2.85,O(n_wafers * n_features)
+AE Dual-Path,4.26,8.521,0.77,1.0,11.08,85.21,O(n_wafers * n_features * epochs)
+Autoencoder,5.054,10.108,0.624,0.972,13.14,101.08,O(n_wafers * n_features * epochs)

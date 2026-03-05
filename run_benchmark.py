@@ -1,12 +1,13 @@
 """
 EDS BIN 변경점 탐지 벤치마크 실행 스크립트 (Wafer 기반)
-7가지 방법: 통계검정 4종 + PCA+T² + AE Standalone + AE Dual-Path Pipeline
+6가지 방법: 통계검정 4종 + AE Standalone + AE Dual-Path Pipeline
 """
 import sys
 import os
 import time
 import warnings
 import numpy as np
+import pandas as pd
 warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,7 +19,6 @@ from src.detectors import (
     KSTestDetector,
     TTestDetector,
     WelchTTestDetector,
-    PCAHotellingAdapter,
     AutoencoderDetector,
 )
 from src.evaluation import BenchmarkEvaluator
@@ -30,7 +30,7 @@ from collections import Counter
 def main():
     print("=" * 70)
     print("  EDS BIN Feature 유의차 검출 벤치마크 (Wafer 기반)")
-    print("  Ref 1000 wafers × 500 features / Comp 100 wafers")
+    print("  Ref 1000 wafers x 500 features / Comp 100 wafers")
     print("=" * 70)
 
     # ──────────────────────────────────────────────
@@ -66,7 +66,6 @@ def main():
         KSTestDetector(alpha=0.05),
         TTestDetector(alpha=0.05),
         WelchTTestDetector(alpha=0.05),
-        PCAHotellingAdapter(n_components=0.95, alpha=0.01),
         AutoencoderDetector(
             hidden_dims=[256, 128, 64],
             epochs=100,
@@ -85,6 +84,9 @@ def main():
     print("\n[3] 벤치마크 실행...")
     evaluator = BenchmarkEvaluator(dataset)
 
+    # 각 탐지기별 검출된 feature 저장
+    all_method_detections = {}
+
     for detector in detectors:
         print(f"    [{detector.name}] 평가 중...", end="", flush=True)
         result = evaluator.evaluate_detector(detector)
@@ -93,6 +95,14 @@ def main():
             f" -> P={m['precision']:.3f}, R={m['recall']:.3f}, "
             f"F1={m['f1']:.3f}, Time={result.execution_time:.3f}s"
         )
+
+        # 검출된 feature indices 저장
+        detected = np.array([r.is_detected for r in result.detection_results], dtype=bool)
+        confidences = np.array([r.confidence for r in result.detection_results])
+        all_method_detections[detector.name] = {
+            "detected": detected,
+            "confidences": confidences,
+        }
 
     # ──────────────────────────────────────────────
     # [4] AE Dual-Path Pipeline (ECO 방법론)
@@ -124,6 +134,15 @@ def main():
     m = dp_benchmark.overall_metrics
     print(f"    -> P={m['precision']:.3f}, R={m['recall']:.3f}, "
           f"F1={m['f1']:.3f}, Time={dp_elapsed:.3f}s")
+
+    # AE Dual-Path 검출 결과도 저장
+    all_method_detections["AE Dual-Path"] = {
+        "detected": dual_result.intersection.astype(bool),
+        "confidences": np.array([
+            float(1.0 - min(dual_result.raw_pvalues_mw[j], dual_result.raw_pvalues_ks[j]))
+            for j in range(len(dual_result.intersection))
+        ]),
+    }
 
     # ──────────────────────────────────────────────
     # [5] 결과 요약
@@ -182,17 +201,63 @@ def main():
         print(f"      ... 외 {len(detected_features) - 20}개")
 
     # ──────────────────────────────────────────────
-    # [8] 시각화
-    # ──────────────────────────────────────────────
-    print("\n[8] 시각화 생성 중...")
-    viz = BenchmarkVisualizer(output_dir="docs/benchmark_results")
-    viz.plot_all(evaluator, dataset, dual_result=dual_result)
-
-    # ──────────────────────────────────────────────
-    # [9] 인사이트
+    # [8] 계산비용 비교 분석
     # ──────────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("  [9] 핵심 인사이트")
+    print("  [8] 계산비용 비교 분석")
+    print("=" * 70)
+
+    cost_rows = []
+    for r in evaluator.results:
+        n_features = dataset.ref_data.shape[1]
+        per_feature_ms = (r.execution_time / n_features) * 1000 if n_features > 0 else 0
+
+        # 확장성 추정 (1000 features, 5000 features)
+        if r.method_name in ["Autoencoder", "AE Dual-Path"]:
+            # AE는 feature 수에 따라 비선형 증가 (네트워크 크기 증가)
+            est_1000 = r.execution_time * (1000 / n_features) * 1.3
+            est_5000 = r.execution_time * (5000 / n_features) * 2.0
+            complexity = "O(n_wafers * n_features * epochs)"
+        else:
+            # 통계검정은 feature 수에 비례
+            est_1000 = r.execution_time * (1000 / n_features)
+            est_5000 = r.execution_time * (5000 / n_features)
+            complexity = "O(n_wafers * n_features)"
+
+        cost_rows.append({
+            "Method": r.method_name,
+            "Total(s)": round(r.execution_time, 3),
+            "Per Feature(ms)": round(per_feature_ms, 3),
+            "F1": round(r.overall_metrics.get("f1", 0), 3),
+            "Precision": round(r.overall_metrics.get("precision", 0), 3),
+            "Est.1000feat(s)": round(est_1000, 2),
+            "Est.5000feat(s)": round(est_5000, 2),
+            "Complexity": complexity,
+        })
+
+    cost_df = pd.DataFrame(cost_rows).sort_values("Total(s)")
+    print(tabulate(cost_df, headers="keys", tablefmt="grid", floatfmt=".3f"))
+
+    # 효율성 지표: F1/Time ratio
+    print("\n  효율성 지표 (F1 / Time):")
+    for _, row in cost_df.iterrows():
+        if row["Total(s)"] > 0:
+            efficiency = row["F1"] / row["Total(s)"]
+            print(f"    - {row['Method']}: {efficiency:.2f} F1/sec")
+
+    # ──────────────────────────────────────────────
+    # [9] 시각화
+    # ──────────────────────────────────────────────
+    print("\n[9] 시각화 생성 중...")
+    viz = BenchmarkVisualizer(output_dir="docs/benchmark_results")
+    viz.plot_all(evaluator, dataset, dual_result=dual_result,
+                 all_method_detections=all_method_detections)
+
+    # ──────────────────────────────────────────────
+    # [10] 인사이트
+    # ──────────────────────────────────────────────
+    print("\n" + "=" * 70)
+    print("  [10] 핵심 인사이트")
     print("=" * 70)
 
     best = summary_df.iloc[0]
@@ -217,9 +282,19 @@ def main():
     print(f"     - 교집합 기반 cross-validation으로 FP 억제")
     print(f"     - AE Error + Raw Feature 이중 검증으로 신뢰도 향상")
 
+    print(f"\n  6) 계산비용 분석:")
+    stat_time = np.mean([r.execution_time for r in evaluator.results
+                         if r.method_name not in ["Autoencoder", "AE Dual-Path"]])
+    ae_time = np.mean([r.execution_time for r in evaluator.results
+                       if r.method_name in ["Autoencoder", "AE Dual-Path"]])
+    print(f"     - 통계검정 평균: {stat_time:.3f}s (실시간 서비스 적합)")
+    print(f"     - AE 기반 평균: {ae_time:.3f}s (배치 분석 적합)")
+    print(f"     - AE는 통계검정 대비 약 {ae_time/stat_time:.0f}배 느림")
+
     # 결과 저장
     summary_df.to_csv("docs/benchmark_results/summary_table.csv", index=False)
     type_df.to_csv("docs/benchmark_results/type_breakdown.csv", index=False)
+    cost_df.to_csv("docs/benchmark_results/cost_analysis.csv", index=False)
     print(f"\n[완료] 모든 결과가 docs/benchmark_results/ 에 저장되었습니다.")
 
 

@@ -71,13 +71,12 @@
 | 3 | T-test | 모수적 평균 비교 기준선 |
 | 4 | Welch's t-test | 이분산 허용 모수 검정 |
 
-### 3.2 다변량/딥러닝 (3종)
+### 3.2 딥러닝 기반 (2종)
 
 | # | 방법 | 특성 |
 |---|------|------|
-| 5 | PCA + Hotelling T2 | 다변량 기여도 분석, IQR threshold |
-| 6 | Autoencoder | FC-AE reconstruction error, IQR threshold |
-| 7 | **AE Dual-Path** | ECO 방법론: AE + 통계검정 교차검증 |
+| 5 | Autoencoder | FC-AE reconstruction error, IQR threshold |
+| 6 | **AE Dual-Path** | ECO 방법론: AE + 통계검정 교차검증 |
 
 ### 3.3 AE Dual-Path Pipeline (ECO 방법론)
 
@@ -103,15 +102,14 @@
 
 | Method | Precision | Recall | F1 | AUC | Time(s) |
 |--------|-----------|--------|-----|-----|---------|
-| **T-test** | **0.887** | **0.893** | **0.890** | 0.969 | 0.192 |
-| **KS Test** | **0.974** | 0.753 | **0.850** | 0.903 | 0.154 |
-| **Mann-Whitney U** | **0.915** | 0.787 | **0.846** | 0.890 | 0.204 |
-| **Welch's t-test** | **0.823** | 0.807 | **0.815** | 0.929 | 0.202 |
-| **AE Dual-Path** | **1.000** | 0.627 | 0.770 | 0.898 | 3.798 |
-| **Autoencoder** | **0.972** | 0.460 | 0.624 | 0.929 | 4.449 |
-| PCA+Hotelling T2 | 0.000 | 0.000 | 0.000 | 0.500 | 0.087 |
+| **T-test** | **0.887** | **0.893** | **0.890** | 0.969 | 0.285 |
+| **KS Test** | **0.974** | 0.753 | **0.850** | 0.903 | 0.196 |
+| **Mann-Whitney U** | **0.915** | 0.787 | **0.846** | 0.890 | 0.251 |
+| **Welch's t-test** | **0.823** | 0.807 | **0.815** | 0.929 | 0.251 |
+| **AE Dual-Path** | **1.000** | 0.627 | 0.770 | 0.898 | 4.260 |
+| **Autoencoder** | **0.972** | 0.460 | 0.624 | 0.929 | 5.054 |
 
-> **Precision 0.8 이상 달성: 6개 방법** (T-test, KS, MW-U, Welch, AE Dual-Path, AE)
+> **Precision 0.8 이상 달성: 6개 방법 전체**
 
 ### 4.2 Performance Heatmap
 
@@ -144,9 +142,25 @@
 
 ---
 
-## 5. Feature 유의차 검출 과정 (AE Dual-Path)
+## 5. 방법별 유의차 Feature 검출 결과
 
-### 5.1 파이프라인 단계별 결과
+### 5.1 전체 방법 비교
+
+각 방법이 검출한 Feature를 TP(정확 검출)/FP(오탐)/FN(미탐)/TN(정상)으로 분류하여 시각화한다.
+
+![All Methods Feature Detection](docs/benchmark_results/all_methods_feature_detection.png)
+
+### 5.2 방법 간 검출 일치도
+
+Jaccard Similarity로 방법 간 검출 결과의 유사성을 비교한다.
+
+![Detection Agreement](docs/benchmark_results/detection_agreement_heatmap.png)
+
+---
+
+## 6. AE Dual-Path Feature 검출 과정
+
+### 6.1 파이프라인 단계별 결과
 
 | 단계 | 검출 Feature 수 |
 |------|:---:|
@@ -156,7 +170,7 @@
 | AE만 유의 | 31개 |
 | Raw만 유의 | 8개 |
 
-### 5.2 Ground Truth 대비 정확도
+### 6.2 Ground Truth 대비 정확도
 
 | 지표 | 값 |
 |------|:---:|
@@ -168,7 +182,7 @@
 
 > **FP = 0**: 교집합 전략으로 False Positive를 완전 제거
 
-### 5.3 Dual-Path Pipeline 시각화
+### 6.3 Dual-Path Pipeline 시각화
 
 ![Dual-Path Summary](docs/benchmark_results/dual_path_summary.png)
 
@@ -176,7 +190,7 @@
 - **중**: Raw Feature KS Statistic - 유의 Feature 표시 (빨간색)
 - **우**: 교집합 분류 (AE만 / 교집합 / Raw만)
 
-### 5.4 Feature별 유의차 검출 결과
+### 6.4 Feature별 유의차 검출 결과
 
 ![Feature Significance](docs/benchmark_results/feature_significance.png)
 
@@ -186,7 +200,7 @@
 - **회색점**: 정상 - 367개
 - **검정 원**: Ground Truth Anomaly 위치
 
-### 5.5 Scatter 차트 (유형별 Ref vs Comp)
+### 6.5 Scatter 차트 (유형별 Ref vs Comp)
 
 | Sporadic Spikes | Level Shift |
 |:---:|:---:|
@@ -202,28 +216,74 @@
 
 ---
 
-## 6. 핵심 인사이트
+## 7. 계산비용 비교 분석
+
+### 7.1 방법별 계산비용
+
+| Method | Total(s) | Per Feature(ms) | F1 | Precision | Est.1000feat(s) | Est.5000feat(s) | Complexity |
+|--------|----------|-----------------|-----|-----------|-----------------|-----------------|------------|
+| KS Test | 0.196 | 0.39 | 0.850 | 0.974 | 0.39 | 1.96 | O(n_wafers * n_features) |
+| Mann-Whitney U | 0.251 | 0.50 | 0.846 | 0.915 | 0.50 | 2.51 | O(n_wafers * n_features) |
+| Welch's t-test | 0.251 | 0.50 | 0.815 | 0.823 | 0.50 | 2.51 | O(n_wafers * n_features) |
+| T-test | 0.285 | 0.57 | 0.890 | 0.887 | 0.57 | 2.85 | O(n_wafers * n_features) |
+| AE Dual-Path | 4.260 | 8.52 | 0.770 | 1.000 | 11.08 | 85.21 | O(n_wafers * n_features * epochs) |
+| Autoencoder | 5.054 | 10.11 | 0.624 | 0.972 | 13.14 | 101.08 | O(n_wafers * n_features * epochs) |
+
+### 7.2 효율성 지표 (F1/sec)
+
+| Method | F1/sec | 평가 |
+|--------|--------|------|
+| KS Test | 4.34 | 가장 효율적 |
+| Mann-Whitney U | 3.37 | 높은 효율 |
+| Welch's t-test | 3.25 | 높은 효율 |
+| T-test | 3.12 | 높은 효율 |
+| AE Dual-Path | 0.18 | 배치 분석용 |
+| Autoencoder | 0.12 | 배치 분석용 |
+
+### 7.3 계산비용 vs 성능 Trade-off
+
+![Cost Analysis](docs/benchmark_results/cost_analysis.png)
+
+### 7.4 실행 시간 비교
+
+![Execution Time](docs/benchmark_results/execution_time.png)
+
+### 7.5 계산비용 요약
+
+| 구분 | 통계검정 (4종) | AE 기반 (2종) |
+|------|--------------|--------------|
+| **평균 처리 시간** | 0.246s | 4.657s |
+| **Feature당 처리 시간** | 0.39~0.57ms | 8.52~10.11ms |
+| **5000 Feature 추정** | 1.96~2.85s | 85~101s |
+| **속도 비율** | 1x (기준) | ~19x 느림 |
+| **서비스 적합성** | 실시간 Dashboard | 배치 분석 |
+| **확장성** | 선형 증가 | 비선형 증가 |
+
+---
+
+## 8. 핵심 인사이트
 
 | # | 인사이트 | 상세 |
 |---|---------|------|
 | 1 | **통계검정이 F1 최고** | T-test (F1=0.890) > KS (0.850) > MW-U (0.846), 즉시 배포 가능 |
 | 2 | **AE Dual-Path가 Precision 최고** | P=1.000 (FP=0), 교집합 전략으로 오탐 완전 제거 |
-| 3 | **KS Test가 가장 효율적** | 0.154초로 가장 빠르면서 P=0.974 |
+| 3 | **KS Test가 가장 효율적** | 0.196초로 가장 빠르면서 P=0.974, 효율성(F1/sec) 최고 |
 | 4 | **Sudden Jump이 가장 어려운 유형** | 1~3 wafer만 변화하므로 분포 비교 방법으로는 탐지 어려움 |
 | 5 | **통계검정은 난이도에 robust** | Easy~Hard 간 Recall 차이가 작아 안정적 |
 | 6 | **AE는 mean shift 계열에 강함** | Level Shift(1.000), Complex Trend(0.933) 잘 탐지 |
 | 7 | **교집합 전략 = FP 제거** | AE + Raw 양쪽 유의한 것만 취해 신뢰도 극대화 |
+| 8 | **통계검정은 AE 대비 ~19배 빠름** | 실시간 Dashboard 배포에 적합, AE는 배치 분석에 적합 |
 
 ---
 
-## 7. 배포 전략 권고
+## 9. 배포 전략 권고
 
 ```
 [즉시 배포]
 +-- Primary: T-test (F1=0.890, P=0.887, R=0.893)
-|   -> 가장 균형잡힌 P/R, 0.2초로 빠름
+|   -> 가장 균형잡힌 P/R, 0.285초로 빠름
 +-- Secondary: KS Test (P=0.974, 가장 높은 정밀도)
-|   -> Precision 우선 시 사용
+|   -> Precision 우선 시 사용, 가장 빠름 (0.196초)
 +-- Precision 극대화: AE Dual-Path (P=1.000, FP=0)
     -> 오탐 허용 불가 시 사용 (Recall은 0.627)
 
@@ -236,13 +296,13 @@
 
 ---
 
-## 8. 실행 방법
+## 10. 실행 방법
 
 ```bash
 # 의존성 설치
 pip install -r requirements.txt
 
-# 벤치마크 실행 (7가지 방법, ~15초)
+# 벤치마크 실행 (6가지 방법, ~15초)
 python run_benchmark.py
 
 # 테스트 (33/33 통과)
@@ -251,7 +311,7 @@ pytest tests/ -v
 
 ---
 
-## 9. Project Structure
+## 11. Project Structure
 
 ```
 chage_point_detection/
@@ -259,17 +319,14 @@ chage_point_detection/
 |   +-- data_generation.py          # 합성 BIN 데이터 생성기 (Wafer 기반)
 |   +-- dual_path_pipeline.py       # AE Dual-Path Pipeline (ECO 방법론)
 |   +-- evaluation.py               # 벤치마크 평가 프레임워크
-|   +-- benchmark_visualization.py  # 벤치마크 시각화 (Scatter + Feature 검출)
-|   +-- pca_hotelling.py            # PCA + Hotelling T2 모델
+|   +-- benchmark_visualization.py  # 벤치마크 시각화 (Scatter + Feature 검출 + 계산비용)
 |   +-- preprocessing.py            # 데이터 전처리
 |   +-- visualization.py            # 기본 시각화
 |   +-- detectors/                  # 변경점 탐지 방법 패키지
 |       +-- base.py                 #   추상 베이스 클래스 (Wafer 기반)
 |       +-- statistical.py          #   Mann-Whitney, KS, T-test, Welch
-|       +-- pca_adapter.py          #   PCA+T2 어댑터
 |       +-- autoencoder.py          #   FC-AE 탐지기
 +-- tests/
-|   +-- test_pca_hotelling.py       # PCA 단위 테스트
 |   +-- test_data_generation.py     # 데이터 생성 테스트
 |   +-- test_detectors.py           # 탐지기 테스트
 +-- docs/
@@ -281,7 +338,7 @@ chage_point_detection/
 
 ---
 
-## 10. Usage
+## 12. Usage
 
 ```python
 from src.data_generation import BINDataGenerator
@@ -314,7 +371,7 @@ for idx in sig_indices:
 
 ---
 
-## 11. References
+## 13. References
 
 1. Hotelling, H. (1947). "Multivariate Quality Control." *Techniques of Statistical Analysis*, McGraw-Hill.
 2. Jackson, J.E. & Mudholkar, G.S. (1979). "Control Procedures for Residuals Associated with PCA." *Technometrics*, 21(3).

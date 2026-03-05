@@ -1,6 +1,6 @@
 """
 벤치마크 전용 시각화 모듈 (Wafer 기반)
-Scatter 차트 + Feature 검출 시각화 + Performance 비교
+Scatter 차트 + Feature 검출 시각화 + Performance 비교 + 계산비용 분석
 """
 import numpy as np
 import pandas as pd
@@ -9,6 +9,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
 
 # 한글 폰트 설정
 plt.rcParams["font.family"] = "Malgun Gothic"
@@ -27,7 +29,7 @@ class BenchmarkVisualizer:
             "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
         ]
 
-    def plot_all(self, evaluator, dataset, dual_result=None):
+    def plot_all(self, evaluator, dataset, dual_result=None, all_method_detections=None):
         """모든 시각화를 한번에 생성"""
         self.plot_scatter_overlay(dataset)
         self.plot_performance_heatmap(evaluator)
@@ -36,9 +38,14 @@ class BenchmarkVisualizer:
         self.plot_anomaly_type_breakdown(evaluator)
         self.plot_difficulty_breakdown(evaluator)
         self.plot_execution_time(evaluator)
+        self.plot_cost_analysis(evaluator)
         if dual_result is not None:
             self.plot_dual_path_summary(dual_result, dataset)
             self.plot_feature_significance(dual_result, dataset)
+        if all_method_detections is not None:
+            self.plot_all_methods_detected_features(
+                all_method_detections, dataset, evaluator
+            )
         print(f"[시각화] 모든 차트가 {self.output_dir}에 저장되었습니다.")
 
     def plot_scatter_overlay(self, dataset):
@@ -71,7 +78,7 @@ class BenchmarkVisualizer:
                        alpha=0.6, s=12, color="#d62728", label="Comp")
             ax.set_xlabel("Wafer Index")
             ax.set_ylabel("Feature Value")
-            ax.set_title(f"Scatter — {atype} ({dataset.feature_names[feat_idx]})")
+            ax.set_title(f"Scatter - {atype} ({dataset.feature_names[feat_idx]})")
             ax.legend(fontsize=9)
             ax.grid(True, alpha=0.3)
 
@@ -83,7 +90,7 @@ class BenchmarkVisualizer:
                      label=f"Comp (mean={np.mean(comp_vals):.4f})", density=True)
             ax2.set_xlabel("Feature Value")
             ax2.set_ylabel("Density")
-            ax2.set_title(f"Distribution — {atype}")
+            ax2.set_title(f"Distribution - {atype}")
             ax2.legend(fontsize=8)
             ax2.grid(True, alpha=0.3)
 
@@ -173,8 +180,6 @@ class BenchmarkVisualizer:
                           s=40, linewidths=0.8)
 
         # Legend
-        from matplotlib.patches import Patch
-        from matplotlib.lines import Line2D
         legend_elements = [
             Patch(facecolor="#d62728", label=f"교집합 (최종): {int(dual_result.intersection.sum())}"),
             Patch(facecolor="#ff7f0e", label=f"AE만: {int(dual_result.ae_only.sum())}"),
@@ -197,8 +202,188 @@ class BenchmarkVisualizer:
         )
         plt.close(fig)
 
+    def plot_all_methods_detected_features(self, all_method_detections, dataset, evaluator):
+        """모든 방법별 유의차 검출 Feature 시각화 (6개 서브플롯)"""
+        method_names = list(all_method_detections.keys())
+        n_methods = len(method_names)
+        n_features = len(dataset.labels)
+
+        # 전체 비교 차트 (6 서브플롯)
+        fig, axes = plt.subplots(n_methods, 1, figsize=(16, 3.5 * n_methods), sharex=True)
+        if n_methods == 1:
+            axes = [axes]
+
+        for idx, method_name in enumerate(method_names):
+            ax = axes[idx]
+            detected = all_method_detections[method_name]["detected"]
+            confidences = all_method_detections[method_name]["confidences"]
+
+            # TP/FP/FN/TN 분류
+            colors = []
+            for j in range(n_features):
+                if detected[j] and dataset.labels[j] == 1:
+                    colors.append("#2ca02c")   # TP (정확 검출) - 초록
+                elif detected[j] and dataset.labels[j] == 0:
+                    colors.append("#d62728")   # FP (오탐) - 빨강
+                elif not detected[j] and dataset.labels[j] == 1:
+                    colors.append("#ff7f0e")   # FN (미탐) - 주황
+                else:
+                    colors.append("#cccccc")   # TN (정상) - 회색
+
+            ax.scatter(range(n_features), confidences, c=colors, s=8, alpha=0.7)
+
+            # Ground truth anomaly 위치 표시
+            anomaly_indices = np.where(dataset.labels == 1)[0]
+            for j in anomaly_indices:
+                ax.scatter(j, confidences[j], facecolors='none', edgecolors='black',
+                          s=30, linewidths=0.5)
+
+            # 성능 정보 가져오기
+            tp = int(np.sum(detected & (dataset.labels == 1)))
+            fp = int(np.sum(detected & (dataset.labels == 0)))
+            fn = int(np.sum(~detected & (dataset.labels == 1)))
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+            title = (f"{method_name}  |  "
+                     f"검출: {int(detected.sum())}개  |  "
+                     f"TP={tp}, FP={fp}, FN={fn}  |  "
+                     f"P={precision:.3f}, R={recall:.3f}, F1={f1:.3f}")
+            ax.set_title(title, fontsize=10, fontweight="bold")
+            ax.set_ylabel("Confidence")
+            ax.grid(True, alpha=0.3)
+            ax.set_ylim(-0.05, 1.05)
+
+        axes[-1].set_xlabel("Feature Index")
+
+        # 공통 범례
+        legend_elements = [
+            Patch(facecolor="#2ca02c", label="TP (정확 검출)"),
+            Patch(facecolor="#d62728", label="FP (오탐)"),
+            Patch(facecolor="#ff7f0e", label="FN (미탐)"),
+            Patch(facecolor="#cccccc", label="TN (정상)"),
+            Line2D([0], [0], marker='o', color='w', markeredgecolor='black',
+                   markerfacecolor='none', markersize=8, label="Ground Truth Anomaly"),
+        ]
+        fig.legend(handles=legend_elements, loc="lower center", ncol=5,
+                   fontsize=10, bbox_to_anchor=(0.5, -0.02))
+
+        fig.suptitle("방법별 유의차 검출 Feature 비교", fontsize=15, y=1.01)
+        fig.tight_layout()
+        fig.savefig(
+            self.output_dir / "all_methods_feature_detection.png",
+            dpi=self.dpi, bbox_inches="tight"
+        )
+        plt.close(fig)
+
+        # 방법 간 검출 일치도 히트맵
+        self._plot_detection_agreement(all_method_detections, dataset)
+
+    def _plot_detection_agreement(self, all_method_detections, dataset):
+        """방법 간 검출 일치도 히트맵"""
+        method_names = list(all_method_detections.keys())
+        n_methods = len(method_names)
+        n_features = len(dataset.labels)
+
+        # 검출 매트릭스 (methods x features)
+        detection_matrix = np.zeros((n_methods, n_features), dtype=int)
+        for i, name in enumerate(method_names):
+            detection_matrix[i] = all_method_detections[name]["detected"].astype(int)
+
+        # 방법 간 Jaccard 유사도
+        jaccard_matrix = np.zeros((n_methods, n_methods))
+        for i in range(n_methods):
+            for j in range(n_methods):
+                intersection = np.sum(detection_matrix[i] & detection_matrix[j])
+                union = np.sum(detection_matrix[i] | detection_matrix[j])
+                jaccard_matrix[i, j] = intersection / union if union > 0 else 0
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.heatmap(
+            jaccard_matrix, annot=True, fmt=".2f", cmap="YlOrRd",
+            xticklabels=method_names, yticklabels=method_names,
+            vmin=0, vmax=1, ax=ax, linewidths=0.5,
+            cbar_kws={"label": "Jaccard Similarity"}
+        )
+        ax.set_title("방법 간 검출 일치도 (Jaccard Similarity)", fontsize=14)
+
+        fig.tight_layout()
+        fig.savefig(
+            self.output_dir / "detection_agreement_heatmap.png",
+            dpi=self.dpi, bbox_inches="tight"
+        )
+        plt.close(fig)
+
+    def plot_cost_analysis(self, evaluator):
+        """계산비용 비교 분석 시각화"""
+        methods = [r.method_name for r in evaluator.results]
+        times = [r.execution_time for r in evaluator.results]
+        f1s = [r.overall_metrics.get("f1", 0) for r in evaluator.results]
+        precisions = [r.overall_metrics.get("precision", 0) for r in evaluator.results]
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+        # 1) 실행 시간 vs F1 Score 산점도
+        ax = axes[0]
+        for i, (t, f1, p, name) in enumerate(zip(times, f1s, precisions, methods)):
+            color = self.colors[i % len(self.colors)]
+            ax.scatter(t, f1, s=150, c=color, edgecolors='black', linewidths=0.5,
+                       zorder=3)
+            ax.annotate(name, (t, f1), fontsize=8,
+                        xytext=(8, 5), textcoords='offset points')
+
+        ax.axhline(0.8, color="red", linestyle="--", alpha=0.5, label="F1 = 0.8")
+        ax.set_xlabel("Execution Time (seconds)", fontsize=11)
+        ax.set_ylabel("F1 Score", fontsize=11)
+        ax.set_title("계산비용 vs 성능 Trade-off", fontsize=13)
+        ax.set_ylim(-0.05, 1.05)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9)
+
+        # 2) Feature당 처리 시간 비교
+        ax2 = axes[1]
+        n_features = 500
+        per_feature_ms = [(t / n_features) * 1000 for t in times]
+
+        sorted_idx = np.argsort(per_feature_ms)
+        sorted_methods = [methods[i] for i in sorted_idx]
+        sorted_pf = [per_feature_ms[i] for i in sorted_idx]
+        sorted_f1 = [f1s[i] for i in sorted_idx]
+
+        bar_colors = ["#2ca02c" if f1 >= 0.8 else "#ff7f0e" if f1 >= 0.5 else "#d62728"
+                      for f1 in sorted_f1]
+        bars = ax2.barh(range(len(sorted_methods)), sorted_pf,
+                        color=bar_colors, edgecolor="black", linewidth=0.5)
+        ax2.set_yticks(range(len(sorted_methods)))
+        ax2.set_yticklabels(sorted_methods, fontsize=10)
+        ax2.set_xlabel("Per Feature Processing Time (ms)", fontsize=11)
+        ax2.set_title("Feature당 처리 시간", fontsize=13)
+        ax2.grid(True, alpha=0.3, axis="x")
+
+        for bar, pf, f1 in zip(bars, sorted_pf, sorted_f1):
+            ax2.text(pf + max(sorted_pf) * 0.02,
+                     bar.get_y() + bar.get_height() / 2,
+                     f"{pf:.2f}ms | F1={f1:.2f}",
+                     va="center", fontsize=9)
+
+        legend_elements = [
+            Patch(facecolor="#2ca02c", label="F1 >= 0.8"),
+            Patch(facecolor="#ff7f0e", label="0.5 <= F1 < 0.8"),
+            Patch(facecolor="#d62728", label="F1 < 0.5"),
+        ]
+        ax2.legend(handles=legend_elements, fontsize=9, loc="lower right")
+
+        fig.suptitle("계산비용 비교 분석", fontsize=15, y=1.02)
+        fig.tight_layout()
+        fig.savefig(
+            self.output_dir / "cost_analysis.png",
+            dpi=self.dpi, bbox_inches="tight"
+        )
+        plt.close(fig)
+
     def plot_performance_heatmap(self, evaluator):
-        """방법 × anomaly 유형 Recall 히트맵"""
+        """방법 x anomaly 유형 Recall 히트맵"""
         methods = [r.method_name for r in evaluator.results]
         anomaly_types = sorted(
             set().union(*(r.per_anomaly_type.keys() for r in evaluator.results))
